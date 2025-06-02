@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
+import numpy as np
 import paho.mqtt.client as mqtt
 import json
 import sqlite3
@@ -8,10 +9,16 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from datetime import datetime
 from threading import Thread
 import queue
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 设置中文字体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
 class SmartHomeUI:
     def __init__(self, root):
+        plt.switch_backend('TkAgg')
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+        plt.rcParams['axes.unicode_minus'] = False
+
         self.root = root
         self.root.title("MQTT智能家居控制系统")
         self.root.geometry("1200x800")
@@ -43,6 +50,8 @@ class SmartHomeUI:
 
         # 启动队列检查
         self.root.after(100, self.process_queue)
+
+        self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
     def setup_ui(self):
         """设置主界面布局"""
@@ -301,20 +310,24 @@ class SmartHomeUI:
             self.connection_status.config(text="未连接", foreground="red")
 
     def update_temperature_data(self, data):
-        """更新温度数据"""
-        self.current_data["temperature"] = data
-        self.temp_var.set(f"{data['temperature']:.1f} °C")
-        self.comfort_var.set(f"舒适度: {data['comfort_level']}")
+        """更新温度数据（兼容字典和浮点数输入）"""
+        if isinstance(data, (int, float)):
+            temp_data = {"temperature": float(data), "comfort_level": "optimal"}
+        else:
+            temp_data = data  # 假设已经是字典格式
 
-        # 更新温度图表
-        temp = data["temperature"]
+        self.current_data["temperature"] = temp_data
+        self.temp_var.set(f"{temp_data['temperature']:.1f} °C")
+
+        # 更新温度图表（保持不变）
+        temp = temp_data["temperature"]
         self.temp_line.set_data([0, 1], [temp, temp])
         self.temp_ax.relim()
         self.temp_ax.autoscale_view()
         self.temp_canvas.draw()
 
         # 检查温度警告
-        if data["comfort_level"] == "high":
+        if "comfort_level" in temp_data and temp_data["comfort_level"] == "high":
             self.add_notification(f"高温警告: {temp}°C", "warning")
 
         self.update_last_update_time()
@@ -425,14 +438,36 @@ class SmartHomeUI:
 
     def plot_lighting_history(self, data):
         """绘制照明历史图表"""
-        timestamps = [row[1] for row in data]
-        brightness = [row[0] for row in data]
+        if not data:
+            self.history_ax.text(0.5, 0.5, '无数据', ha='center')
+            return
 
-        self.history_ax.bar(timestamps, brightness, width=0.02)
-        self.history_ax.set_title("照明亮度历史")
-        self.history_ax.set_ylabel("亮度 (%)")
+        timestamps = [datetime.strptime(row[1], '%Y-%m-%d %H:%M:%S') for row in data]
+        temps = [row[0] for row in data]
+
+        # 计算移动平均
+        window_size = min(7, len(temps))
+        if window_size > 1:
+            weights = np.repeat(1.0, window_size) / window_size
+            ma = np.convolve(temps, weights, 'valid')
+            ma_timestamps = timestamps[window_size - 1:]
+            self.history_ax.plot(ma_timestamps, ma, 'r-', label='7点移动平均', linewidth=2)
+
+        # 绘制原始数据
+        self.history_ax.plot(timestamps, temps, 'b-', alpha=0.3, label='原始数据')
+
+        # 添加统计信息
+        avg_temp = np.mean(temps)
+        max_temp = max(temps)
+        min_temp = min(temps)
+        self.history_ax.axhline(avg_temp, color='g', linestyle='--',
+                                label=f'平均 {avg_temp:.1f}°C')
+
+        self.history_ax.set_title(f"温度历史 (最高: {max_temp:.1f}°C, 最低: {min_temp:.1f}°C)")
+        self.history_ax.legend()
         self.history_ax.grid(True)
 
+        # 旋转x轴标签
         for label in self.history_ax.get_xticklabels():
             label.set_rotation(45)
 
@@ -441,7 +476,9 @@ class SmartHomeUI:
         timestamps = [row[1] for row in data]
         lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
 
-        self.history_ax.stem(timestamps, lock_status, use_line_collection=True)
+        # 移除use_line_collection参数
+        self.history_ax.stem(timestamps, lock_status)
+
         self.history_ax.set_title("门锁状态历史")
         self.history_ax.set_yticks([0, 1])
         self.history_ax.set_yticklabels(["锁定", "解锁"])
@@ -499,6 +536,10 @@ class SmartHomeUI:
     def run(self):
         """运行主循环"""
         self.root.mainloop()
+
+    def shutdown(self):
+        plt.close('all')
+        self.root.quit()
 
 
 if __name__ == "__main__":
