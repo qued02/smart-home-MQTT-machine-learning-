@@ -4,6 +4,7 @@ import random
 import sqlite3
 import numpy as np
 import threading
+import time
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
@@ -24,6 +25,57 @@ class SecurityPublisher:
         self.lock_model = RandomForestClassifier()
         self.noise_model = RandomForestClassifier()
         self._train_models()
+        self.room_type = "living_room"  # 可配置为 bedroom/kitchen等
+        self.occupancy = False
+        self.last_motion_time = time.time()
+
+    def _simulate_real_lighting(self):
+        now = datetime.now()
+        hour = now.hour + now.minute/60
+
+        # 基础光照 (考虑昼夜变化)
+        if 6 <= hour < 18:  # 白天
+            base_light = 80 + 40 * np.sin(np.pi*(hour-12)/12)
+        else:  # 夜晚
+            base_light = 10 + 5 * np.sin(np.pi*(hour-24)/12)
+
+        # 随机波动
+        random_effect = np.random.randint(-5, 5)
+
+        # 人体活动影响 (30%概率检测到活动)
+        motion_effect = 0
+        if np.random.random() < 0.3:
+            self.occupancy = True
+            self.last_motion_time = time.time()
+            motion_effect = 30 + np.random.randint(0, 20)
+        elif time.time() - self.last_motion_time > 300:  # 5分钟无活动
+            self.occupancy = False
+
+        # 房间类型调整
+        room_adjustments = {
+            'living_room': 5,
+            'bedroom': -10,
+            'kitchen': 15,
+            'bathroom': 0
+        }
+
+        brightness = base_light + random_effect
+        if self.occupancy:
+            brightness += motion_effect
+
+        brightness += room_adjustments[self.room_type]
+        return np.clip(brightness, 0, 100)
+
+    def publish(self):
+        # 使用现实模拟数据
+        self.data["brightness"] = int(self._simulate_real_lighting())
+
+        # 智能相机模式 (有人且亮度<30时切到night-vision)
+        if self.occupancy and self.data["brightness"] < 30:
+            self.data["camera_mode"] = "night-vision"
+        else:
+            self.data["camera_mode"] = "auto"
+
 
     def _get_time_of_day(self):
         """获取当前时间段（早晨/白天/晚上/深夜）"""
@@ -189,6 +241,11 @@ class SecuritySubscriber:
         if data['noise_reduction'] == "disabled" and (hour > 22 or hour < 8):
             print(f"[Security] Warning: Noise reduction disabled during quiet hours")
 
+    def __del__(self):
+        """清理资源"""
+        if self.analysis_timer is not None:
+            self.analysis_timer.cancel()
+        self.conn.close()
     def __del__(self):
         """清理资源"""
         if self.analysis_timer is not None:
