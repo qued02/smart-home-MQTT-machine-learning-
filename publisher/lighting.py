@@ -7,6 +7,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from datetime import datetime
+from sklearn.preprocessing import StandardScaler
 
 
 class LightingPublisher:
@@ -28,6 +29,8 @@ class LightingPublisher:
         self.room_type = "living_room"  # 可配置为 bedroom/kitchen等
         self.occupancy = False
         self.last_motion_time = time.time()
+        self.scaler = StandardScaler()
+        self.model = LinearRegression()
 
     def _simulate_real_lighting(self):
         now = datetime.now()
@@ -77,15 +80,32 @@ class LightingPublisher:
             self.data["camera_mode"] = "auto"
 
     def train_model(self):
-        X = np.array([data[0] for data in self.history_data]).reshape(-1, 1)
-        y = np.array([data[1] for data in self.history_data])
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        hours = np.random.randint(0, 24, 1000)
+        brightness = np.clip(80 + 30 * np.sin(np.pi * (hours - 12) / 12) + np.random.normal(0, 5, 1000), 0, 100)
+        self.history_data = np.column_stack((hours, brightness))
+
+        X = self.history_data[:, 0].reshape(-1, 1)
+        y = self.history_data[:, 1]
+
+        # 添加多项式特征
+        from sklearn.preprocessing import PolynomialFeatures
+        poly = PolynomialFeatures(degree=2)
+        X_poly = poly.fit_transform(X)
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_poly, y, test_size=0.2, random_state=42)
+
+        self.model = LinearRegression()
         self.model.fit(X_train, y_train)
+
         y_pred = self.model.predict(X_test)
         mse = mean_squared_error(y_test, y_pred)
-        print(f"Lighting模型MSE: {mse}")
+        print(f"Lighting model MSE: {mse:.2f}")
 
     def predict_brightness_adjustment(self, ambient_light):
+        if hasattr(self, 'scaler'):
+            ambient_light_scaled = self.scaler.transform([[ambient_light]])
+            return int(self.model.predict(ambient_light_scaled)[0])
         return int(self.model.predict([[ambient_light]])[0])
 
     def publish(self):
