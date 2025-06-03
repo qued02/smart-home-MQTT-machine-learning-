@@ -103,11 +103,15 @@ class LightingPublisher:
         self.data["camera_mode"] = random.choice(["auto", "manual", "off"])
 
         try:
-            self.client.publish(self.topic, json.dumps(self.data))
-            print(f"[Lighting] Published: {self.data}")
+            # QoS 1 - 控制指令需要确认
+            self.client.publish(
+                self.topic,
+                json.dumps(self.data),
+                qos=1
+            )
+            print(f"[Lighting] Published (QoS 1): {self.data}")
         except Exception as e:
             print(f"[Lighting] Publish error: {e}")
-
 
 # 保持LightingSubscriber类完全不变
 class LightingSubscriber:
