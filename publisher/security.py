@@ -69,52 +69,44 @@ class SecurityPublisher:
 
     def _train_models(self):
         """训练门锁和噪音抑制的预测模型"""
-        conn = None
         try:
             conn = sqlite3.connect('smart_home.db')
             cursor = conn.cursor()
 
-            # 检查是否有足够数据，否则生成模拟数据
-            cursor.execute("SELECT COUNT(*) FROM security_status")
-            count = cursor.fetchone()[0]
+            # 修改查询语句，确保返回数值类型
+            cursor.execute('''SELECT 
+                                  lock_status, 
+                                  noise_reduction, 
+                                  CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                                  CAST(strftime('%w', timestamp) AS INTEGER) as weekday
+                                  FROM security_status''')
+            records = cursor.fetchall()
 
-            if count < 50:
-                print("[Security] Generating synthetic training data")
-                # 使用更真实的模拟数据模式
+            if not records:
+                # 生成模拟数据时也要确保数值类型
                 simulated_data = []
                 for _ in range(100):
                     hour = random.randint(0, 23)
-                    # 更复杂的逻辑规则
-                    is_weekday = random.random() < 0.7  # 70%概率是工作日
+                    is_weekday = random.random() < 0.7
                     lock_status = "unlocked" if (8 <= hour <= 20 and is_weekday) else "locked"
                     noise_status = "enabled" if (hour >= 22 or hour <= 7) else "disabled"
-                    simulated_data.append((lock_status, noise_status, f"{hour:02d}:00:00"))
+                    simulated_data.append((lock_status, noise_status, hour, int(is_weekday)))
 
-                # 批量插入提高效率
                 cursor.executemany(
                     "INSERT INTO security_status (lock_status, noise_reduction, timestamp) VALUES (?, ?, datetime('now', ? || ' hours'))",
                     [(d[0], d[1], f"-{random.randint(1, 30)}") for d in simulated_data]
                 )
                 conn.commit()
+                cursor.execute('''SELECT 
+                                      lock_status, 
+                                      noise_reduction, 
+                                      CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                                      CAST(strftime('%w', timestamp) AS INTEGER) as weekday
+                                      FROM security_status''')
+                records = cursor.fetchall()
 
-            # 获取历史数据 - 添加更多特征
-            cursor.execute('''SELECT 
-                              lock_status, 
-                              noise_reduction, 
-                              strftime('%H', timestamp) as hour,
-                              strftime('%w', timestamp) as weekday  # 0-6, 0是周日
-                              FROM security_status''')
-            records = cursor.fetchall()
-
-            if not records:
-                raise ValueError("No training data available")
-
-            # 准备特征和标签 - 添加更多特征
-            X = np.array([
-                [int(row[2]), int(row[3])]  # 小时 + 星期几
-                for row in records
-            ])
-
+            # 准备特征和标签
+            X = np.array([[row[2], row[3]] for row in records])  # hour和weekday已经是整数
             y_lock = np.array([1 if row[0] == "unlocked" else 0 for row in records])
             y_noise = np.array([1 if row[1] == "enabled" else 0 for row in records])
 
@@ -191,8 +183,14 @@ class SecurityPublisher:
         self.data.update(sensor_data)
 
         try:
-            self.client.publish(self.topic, json.dumps(self.data))
-            print(f"[Security] Published: {self.data}")
+            # QoS 2 - 确保且仅一次交付（关键安全消息）
+            self.client.publish(
+                self.topic,
+                json.dumps(self.data),
+                qos=2,
+                retain=True
+            )
+            print(f"[Security] Published (QoS 2): {self.data}")
         except Exception as e:
             print(f"[Security] Publish error: {e}")
 
