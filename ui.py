@@ -556,61 +556,73 @@ class SmartHomeUI:
 
     def update_history_chart(self):
         """更新历史图表"""
-        data_type = self.data_type.get()
-        time_range = self.time_range.get()
+        try:
+            data_type = self.data_type.get()
+            time_range = self.time_range.get()
 
-        # 从数据库获取数据
-        data = self.get_history_data(data_type, time_range)
+            if not data_type or not time_range:
+                return
 
-        # 清除旧图表
-        self.history_ax.clear()
+            data = self.get_history_data(data_type, time_range)
 
-        if data_type == "temperature":
-            self.plot_temperature_history(data)
-        elif data_type == "lighting":
-            self.plot_lighting_history(data)
-        elif data_type == "security":
-            self.plot_security_history(data)
+            self.history_ax.clear()
 
-        self.history_canvas.draw()
+            if data_type == "temperature":
+                self.plot_temperature_history(data)
+            elif data_type == "lighting":
+                self.plot_lighting_history(data)
+            elif data_type == "security":
+                self.plot_security_history(data)
+
+            self.history_canvas.draw()
+
+        except Exception as e:
+            print(f"更新历史图表错误: {e}")
+            self.history_ax.clear()
+            self.history_ax.text(0.5, 0.5, f'错误: {str(e)}', ha='center')
+            self.history_canvas.draw()
 
     def get_history_data(self, data_type, time_range):
         """从数据库获取历史数据"""
         conn = sqlite3.connect("smart_home.db")
         cursor = conn.cursor()
 
-        # 根据时间范围计算时间条件
+        # 使用更精确的时间条件
         if time_range == "1小时":
-            time_condition = "datetime(timestamp) >= datetime('now', '-1 hour')"
+            time_condition = "timestamp >= datetime('now', '-1 hour')"
         elif time_range == "24小时":
-            time_condition = "datetime(timestamp) >= datetime('now', '-1 day')"
+            time_condition = "timestamp >= datetime('now', '-1 day')"
         else:  # 7天
-            time_condition = "datetime(timestamp) >= datetime('now', '-7 days')"
+            time_condition = "timestamp >= datetime('now', '-7 days')"
 
-        if data_type == "temperature":
-            cursor.execute(f"""
-                SELECT temperature, timestamp 
-                FROM temperature 
-                WHERE {time_condition}
-                ORDER BY timestamp
-            """)
+        try:
+            if data_type == "temperature":
+                cursor.execute(f"""
+                    SELECT temperature, strftime('%Y-%m-%d %H:%M:%S', timestamp) 
+                    FROM temperature 
+                    WHERE {time_condition}
+                    ORDER BY timestamp
+                """)
+            elif data_type == "lighting":
+                cursor.execute(f"""
+                    SELECT brightness, strftime('%Y-%m-%d %H:%M:%S', timestamp) 
+                    FROM lighting 
+                    WHERE {time_condition}
+                    ORDER BY timestamp
+                """)
+            else:  # security
+                cursor.execute(f"""
+                    SELECT lock_status, strftime('%Y-%m-%d %H:%M:%S', timestamp) 
+                    FROM security_status 
+                    WHERE {time_condition}
+                    ORDER BY timestamp
+                """)
             return cursor.fetchall()
-        elif data_type == "lighting":
-            cursor.execute(f"""
-                SELECT brightness, timestamp 
-                FROM lighting 
-                WHERE {time_condition}
-                ORDER BY timestamp
-            """)
-            return cursor.fetchall()
-        else:  # security
-            cursor.execute(f"""
-                SELECT lock_status, timestamp 
-                FROM security_status 
-                WHERE {time_condition}
-                ORDER BY timestamp
-            """)
-            return cursor.fetchall()
+        except Exception as e:
+            print(f"数据库查询错误: {e}")
+            return []
+        finally:
+            conn.close()
 
     def plot_temperature_history(self, data):
         """绘制温度历史图表"""
@@ -670,19 +682,35 @@ class SmartHomeUI:
 
     def plot_security_history(self, data):
         """绘制安全历史图表"""
+        if not data:  # 检查数据是否为空
+            self.history_ax.clear()
+            self.history_ax.text(0.5, 0.5, '无安全数据', ha='center')
+            self.history_canvas.draw()
+            return
+
         timestamps = [row[1] for row in data]
         lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
 
-        # 移除use_line_collection参数
-        self.history_ax.stem(timestamps, lock_status)
+        self.history_ax.clear()  # 先清空图表
+
+        # 使用更兼容的绘图方式
+        markerline, stemlines, baseline = self.history_ax.stem(
+            range(len(timestamps)), lock_status, use_line_collection=True)
+
+        # 设置x轴标签为时间
+        self.history_ax.set_xticks(range(len(timestamps)))
+        self.history_ax.set_xticklabels(timestamps)
 
         self.history_ax.set_title("门锁状态历史")
         self.history_ax.set_yticks([0, 1])
         self.history_ax.set_yticklabels(["锁定", "解锁"])
         self.history_ax.grid(True)
 
+        # 旋转x轴标签
         for label in self.history_ax.get_xticklabels():
             label.set_rotation(45)
+
+        self.history_ax.figure.tight_layout()
 
     def add_notification(self, message, level="info"):
         """添加系统通知"""
