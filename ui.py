@@ -1,3 +1,4 @@
+import ssl
 import tkinter as tk
 from tkinter import ttk, messagebox
 import numpy as np
@@ -28,7 +29,7 @@ class SmartHomeUI:
 
         # 使用与其他模块一致的MQTT配置
         self.broker = "test.mosquitto.org"
-        self.port = 1883
+        self.port = 8883
         self.topics = {
             "temperature": "home/sensor/temperature",
             "lighting": "home/sensor/lighting",
@@ -418,11 +419,19 @@ class SmartHomeUI:
         """设置MQTT连接"""
         self.client = mqtt.Client(client_id="SmartHomeUI")
 
+        # 添加TLS配置
+        self.client.tls_set(
+            ca_certs="mosquitto.org.crt",
+            cert_reqs=ssl.CERT_REQUIRED,
+            tls_version=ssl.PROTOCOL_TLSv1_2
+        )
+
         self.client.on_connect = self.on_mqtt_connect
         self.client.on_message = self.on_mqtt_message
 
         try:
-            self.client.connect(self.broker, self.port, 60)
+            # 注意端口改为8883（TLS默认端口）
+            self.client.connect(self.broker, 8883, 60)
             self.client.loop_start()
         except Exception as e:
             messagebox.showerror("连接错误", f"无法连接到MQTT代理: {e}")
