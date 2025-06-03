@@ -83,9 +83,9 @@ class SmartHomeSystem:
         if rc == 0:
             print("Connected to MQTT Broker!")
             # 订阅所有需要的主题
-            client.subscribe(TEMPERATURE_TOPIC)
-            client.subscribe(LIGHTING_TOPIC)
-            client.subscribe(SECURITY_TOPIC)
+            client.subscribe(TEMPERATURE_TOPIC, qos=1)  # 温度
+            client.subscribe(LIGHTING_TOPIC, qos=1)  # 照明
+            client.subscribe(SECURITY_TOPIC, qos=2)  # 安全
         else:
             print(f"Connection failed with code {rc}")
 
