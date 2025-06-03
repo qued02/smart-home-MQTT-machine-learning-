@@ -417,6 +417,7 @@ class SmartHomeUI:
     def setup_mqtt(self):
         """设置MQTT连接"""
         self.client = mqtt.Client(client_id="SmartHomeUI")
+
         self.client.on_connect = self.on_mqtt_connect
         self.client.on_message = self.on_mqtt_message
 
@@ -431,8 +432,9 @@ class SmartHomeUI:
         if rc == 0:
             self.queue_message("update_status", {"connected": True})
             # 订阅所有主题
-            for topic in self.topics.values():
-                client.subscribe(topic)
+            client.subscribe(self.topics["temperature"], qos=1)  # 温度数据需要可靠
+            client.subscribe(self.topics["lighting"], qos=1)  # 照明状态中等重要
+            client.subscribe(self.topics["security"], qos=2)  # 安全警报最高优先级
         else:
             self.queue_message("update_status", {"connected": False})
 
