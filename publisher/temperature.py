@@ -88,6 +88,18 @@ class TemperaturePublisher:
         else:
             self.data["comfort_level"] = "hot"
 
+        try:
+            # QoS 1 - 至少交付一次（确保温度数据不丢失）
+            self.client.publish(
+                self.topic,
+                json.dumps(self.data),
+                qos=1,
+                retain=True  # 保留最后一条消息给新订阅者
+            )
+            print(f"[Temperature] Published (QoS 1): {self.data}")
+        except Exception as e:
+            print(f"[Temperature] Publish error: {e}")
+
     def generate_synthetic_data(self):
         """生成模拟温度数据（包含正常和异常点）"""
         np.random.seed(42)
