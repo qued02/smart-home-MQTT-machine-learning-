@@ -18,7 +18,9 @@ class SecurityPublisher:
         self.data = {
             "lock_status": "locked",
             "noise_reduction": "enabled",
-            "time_of_day": self._get_time_of_day()
+            "time_of_day": self._get_time_of_day(),
+            "motion_detected": False,
+            "window_status": "closed"
         }
 
         # 初始化机器学习模型
@@ -26,56 +28,32 @@ class SecurityPublisher:
         self.noise_model = RandomForestClassifier()
         self._train_models()
         self.room_type = "living_room"  # 可配置为 bedroom/kitchen等
-        self.occupancy = False
         self.last_motion_time = time.time()
 
-    def _simulate_real_lighting(self):
+    def _simulate_security_sensors(self):
+        """模拟安全传感器数据"""
         now = datetime.now()
-        hour = now.hour + now.minute/60
+        hour = now.hour + now.minute / 60
 
-        # 基础光照 (考虑昼夜变化)
-        if 6 <= hour < 18:  # 白天
-            base_light = 80 + 40 * np.sin(np.pi*(hour-12)/12)
-        else:  # 夜晚
-            base_light = 10 + 5 * np.sin(np.pi*(hour-24)/12)
+        # 运动检测概率 (夜间更高)
+        motion_prob = 0.1  # 基础概率
+        if hour < 6 or hour > 22:  # 夜间
+            motion_prob = 0.3
 
-        # 随机波动
-        random_effect = np.random.randint(-5, 5)
-
-        # 人体活动影响 (30%概率检测到活动)
-        motion_effect = 0
-        if np.random.random() < 0.3:
-            self.occupancy = True
+        # 随机运动事件
+        motion_detected = random.random() < motion_prob
+        if motion_detected:
             self.last_motion_time = time.time()
-            motion_effect = 30 + np.random.randint(0, 20)
-        elif time.time() - self.last_motion_time > 300:  # 5分钟无活动
-            self.occupancy = False
 
-        # 房间类型调整
-        room_adjustments = {
-            'living_room': 5,
-            'bedroom': -10,
-            'kitchen': 15,
-            'bathroom': 0
+        # 窗户状态 (基于时间和运动)
+        window_open = False
+        if 8 <= hour <= 20 and motion_detected:  # 白天且有运动
+            window_open = random.random() < 0.2
+
+        return {
+            "motion_detected": motion_detected,
+            "window_status": "open" if window_open else "closed"
         }
-
-        brightness = base_light + random_effect
-        if self.occupancy:
-            brightness += motion_effect
-
-        brightness += room_adjustments[self.room_type]
-        return np.clip(brightness, 0, 100)
-
-    def publish(self):
-        # 使用现实模拟数据
-        self.data["brightness"] = int(self._simulate_real_lighting())
-
-        # 智能相机模式 (有人且亮度<30时切到night-vision)
-        if self.occupancy and self.data["brightness"] < 30:
-            self.data["camera_mode"] = "night-vision"
-        else:
-            self.data["camera_mode"] = "auto"
-
 
     def _get_time_of_day(self):
         """获取当前时间段（早晨/白天/晚上/深夜）"""
@@ -176,6 +154,7 @@ class SecurityPublisher:
         finally:
             if conn:
                 conn.close()
+
     def _predict_security_settings(self):
         """使用机器学习模型预测安全设置"""
         if not hasattr(self, 'lock_model') or not hasattr(self, 'noise_model'):
@@ -207,6 +186,10 @@ class SecurityPublisher:
         # 使用机器学习模型预测状态（替代完全随机）
         self._predict_security_settings()
 
+        # 更新安全传感器数据
+        sensor_data = self._simulate_security_sensors()
+        self.data.update(sensor_data)
+
         try:
             self.client.publish(self.topic, json.dumps(self.data))
             print(f"[Security] Published: {self.data}")
@@ -231,6 +214,8 @@ class SecuritySubscriber:
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             lock_status TEXT,
                             noise_reduction TEXT,
+                            motion_detected INTEGER,
+                            window_status TEXT,
                             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
         self.conn.commit()
 
@@ -252,7 +237,7 @@ class SecuritySubscriber:
         try:
             # 获取过去7天的数据
             cutoff = datetime.now() - timedelta(days=7)
-            self.cursor.execute('''SELECT lock_status, noise_reduction, 
+            self.cursor.execute('''SELECT lock_status, noise_reduction, motion_detected, window_status,
                                   strftime('%H', timestamp) as hour 
                                   FROM security_status 
                                   WHERE timestamp > ?''', (cutoff,))
@@ -261,11 +246,12 @@ class SecuritySubscriber:
             if len(records) > 20:
                 # 分析最常见的模式组合
                 from collections import Counter
-                patterns = Counter((r[0], r[1], int(r[2]) // 6) for r in records)  # 按4小时分段
+                patterns = Counter((r[0], r[1], r[2], r[3], int(r[4]) // 6) for r in records)  # 按4小时分段
                 common_pattern = patterns.most_common(1)[0][0]
                 print(f"[Security] Most common pattern: "
                       f"Lock={common_pattern[0]}, Noise={common_pattern[1]}, "
-                      f"Time={common_pattern[2] * 6}-{(common_pattern[2] + 1) * 6}h")
+                      f"Motion={common_pattern[2]}, Window={common_pattern[3]}, "
+                      f"Time={common_pattern[4] * 6}-{(common_pattern[4] + 1) * 6}h")
 
             # 重新安排下一次分析
             self._schedule_next_analysis()
@@ -279,8 +265,13 @@ class SecuritySubscriber:
             print(f"[Security] Received: {data}")
 
             # 存储到数据库
-            self.cursor.execute("INSERT INTO security_status (lock_status, noise_reduction) VALUES (?, ?)",
-                                (data['lock_status'], data['noise_reduction']))
+            self.cursor.execute("""INSERT INTO security_status 
+                                (lock_status, noise_reduction, motion_detected, window_status) 
+                                VALUES (?, ?, ?, ?)""",
+                                (data['lock_status'],
+                                 data['noise_reduction'],
+                                 int(data['motion_detected']),
+                                 data.get('window_status', 'closed')))
             self.conn.commit()
 
             # 检查异常模式（可选）
@@ -292,13 +283,20 @@ class SecuritySubscriber:
             print(f"[Security] Database error: {e}")
 
     def _check_anomalies(self, data):
-        """检查异常安全状态（如深夜解锁）"""
+        """检查异常安全状态"""
         hour = datetime.now().hour
+
+        # 深夜解锁
         if data['lock_status'] == "unlocked" and (hour < 6 or hour > 23):
             print(f"[Security] Warning: Unusual unlock detected at night ({hour}:00)")
 
+        # 安静时间关闭噪音抑制
         if data['noise_reduction'] == "disabled" and (hour > 22 or hour < 8):
             print(f"[Security] Warning: Noise reduction disabled during quiet hours")
+
+        # 夜间检测到运动且窗户打开
+        if data['motion_detected'] and data.get('window_status') == "open" and (hour < 6 or hour > 22):
+            print(f"[Security] Alert: Motion detected with open window at night!")
 
     def __del__(self):
         """清理资源"""
