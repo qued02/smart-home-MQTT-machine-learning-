@@ -5,10 +5,13 @@ import paho.mqtt.client as mqtt
 import json
 import sqlite3
 import matplotlib.pyplot as plt
+from matplotlib import animation
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from datetime import datetime
 from threading import Thread
 import queue
+from tkinter import font
+import ttkbootstrap as ttk
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 设置中文字体
 plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
@@ -50,7 +53,7 @@ class SmartHomeUI:
 
         # 启动队列检查
         self.root.after(100, self.process_queue)
-
+        self.current_filter = "all"  # 当前通知过滤级别
         self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
 
     def setup_ui(self):
@@ -86,6 +89,140 @@ class SmartHomeUI:
         self.setup_display_area()
         self.setup_notification_area()
 
+    def setup_themes(self):
+        style = ttk.Style()
+
+        # 浅色主题
+        style.configure('Light.TFrame', background='#f5f5f5')
+        style.configure('Light.TLabel', background='#f5f5f5', foreground='#333')
+        style.configure('Light.TButton', background='#e1e1e1', bordercolor='#ccc')
+
+        # 深色主题
+        style.configure('Dark.TFrame', background='#2d2d2d')
+        style.configure('Dark.TLabel', background='#2d2d2d', foreground='#eee')
+        style.configure('Dark.TButton', background='#3d3d3d', foreground='white')
+
+        # 默认应用浅色主题
+        self.apply_theme('light')
+
+    def create_rounded_rect(canvas, x1, y1, x2, y2, radius=25, **kwargs):
+        points = [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1, x2, y1 + radius,
+            x2, y2 - radius,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2, x1, y2 - radius,
+            x1, y1 + radius,
+            x1 + radius, y1
+        ]
+        return canvas.create_polygon(points, **kwargs, smooth=True)
+
+    def add_shadow(widget, offset=2, color='gray20'):
+        shadow = tk.Frame(widget.master, bg=color)
+        shadow.place(in_=widget, x=offset, y=offset,
+                     width=widget.winfo_width(),
+                     height=widget.winfo_height())
+        widget.lift()  # 将主控件置于阴影上方
+
+    def apply_theme(self, theme):
+        bg = '#f5f5f5' if theme == 'light' else '#2d2d2d'
+        self.root.config(bg=bg)
+        for widget in self.root.winfo_children():
+            if isinstance(widget, (ttk.Frame, ttk.Label)):
+                widget.configure(style=f'{theme.capitalize()}.T{type(widget).__name__[1:]}')
+
+    def setup_icons(self):
+        icon_font = font.Font(family='FontAwesome', size=12)
+
+        self.icons = {
+            'lightbulb': '\uf0eb',  # 灯泡图标
+            'thermometer': '\uf2c7',  # 温度计
+            'lock': '\uf023',  # 锁
+            'unlock': '\uf09c'  # 解锁
+        }
+
+        ttk.Button(self.toolbar,
+                   text=f"{self.icons['lightbulb']} 灯光",
+                   font=icon_font).pack(side=tk.LEFT)
+
+    def setup_responsive_layout(self):
+        # 主框架配置
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 使用grid权重实现自适应
+        self.main_frame.columnconfigure(0, weight=1)
+        self.main_frame.rowconfigure(1, weight=1)
+
+        # 窗口大小绑定事件
+        self.root.bind('<Configure>', self.on_window_resize)
+
+    def on_window_resize(self, event):
+        width = event.width
+        if width < 800:  # 小窗口布局
+            self.sidebar.pack_forget()
+            self.collapse_button.pack(side=tk.LEFT)
+        else:  # 大窗口布局
+            self.collapse_button.pack_forget()
+            self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+    def create_collapsible_sidebar(self):
+        self.sidebar = ttk.Frame(self.main_frame, width=200)
+        self.sidebar.pack_propagate(False)
+
+        # 折叠按钮
+        self.collapse_button = ttk.Button(self.main_frame, text='☰',
+                                          command=self.toggle_sidebar)
+
+        # 侧边栏内容
+        ttk.Label(self.sidebar, text="智能家居控制").pack(pady=10)
+        self.device_list = ttk.Treeview(self.sidebar)
+        self.device_list.pack(fill=tk.BOTH, expand=True)
+
+    def toggle_sidebar(self):
+        if self.sidebar.winfo_ismapped():
+            self.sidebar.pack_forget()
+        else:
+            self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+
+    def setup_enhanced_charts(self):
+        # 创建双轴图表
+        fig, ax1 = plt.subplots(figsize=(8, 4))
+        ax2 = ax1.twinx()
+
+        # 温度数据（折线图+渐变填充）
+        temp_line = ax1.plot([], [], 'C0-', label='温度')[0]
+        ax1.fill_between([], [], [], color='C0', alpha=0.1)
+
+        # 湿度数据（柱状图）
+        humidity_bars = ax2.bar([], [], width=0.8, alpha=0.3, color='C1')
+
+        # 动画配置
+        def update_chart(frame):
+            temp_line.set_data(range(24), np.random.randint(15, 30, 24))
+            ax1.collections[0].remove()  # 移除旧填充
+            ax1.fill_between(range(24), np.random.randint(15, 30, 24),
+                             color='C0', alpha=0.1)
+
+            for bar, h in zip(humidity_bars, np.random.randint(30, 80, 24)):
+                bar.set_height(h)
+
+        self.ani = animation.FuncAnimation(fig, update_chart, frames=10, interval=1000)
+
+    def animate_value_change(widget, start, end, duration=500):
+        steps = 20
+        delta = (end - start) / steps
+
+        def _animate(step=0):
+            current = start + delta * step
+            widget.config(text=f"{current:.1f}°C")
+            if step < steps:
+                widget.after(duration // steps, _animate, step + 1)
+
+        _animate()
+
     def setup_temperature_controls(self):
         """温度控制组件"""
         frame = ttk.Labelframe(self.control_frame, text="温度控制")
@@ -100,7 +237,11 @@ class SmartHomeUI:
         ttk.Label(frame, textvariable=self.comfort_var).pack()
 
         # 温度阈值设置
-        ttk.Label(frame, text="温度阈值:").pack(anchor=tk.W)
+        threshold_frame = ttk.Frame(frame)
+        threshold_frame.pack(fill=tk.X)
+        ttk.Label(threshold_frame, text="温度阈值:").pack(side=tk.LEFT)
+        self.threshold_value = ttk.Label(threshold_frame, text="25.0°C")
+        self.threshold_value.pack(side=tk.LEFT, padx=5)
         self.threshold_slider = ttk.Scale(
             frame, from_=15, to=35, value=25,
             command=lambda v: self.on_threshold_change(float(v)))
@@ -116,6 +257,7 @@ class SmartHomeUI:
         self.brightness_slider = ttk.Scale(
             frame, from_=0, to=100, value=80,
             command=lambda v: self.on_lighting_change("brightness", int(float(v))))
+        self.brightness_slider.configure(style='TickScale.Horizontal.TScale')
         self.brightness_slider.pack(fill=tk.X)
 
         # 相机调节模式 - 使用与LightingPublisher一致的选项
@@ -169,30 +311,35 @@ class SmartHomeUI:
 
     def setup_realtime_charts(self):
         """实时数据图表"""
-        frame = ttk.Frame(self.realtime_tab)
-        frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        chart_frame = ttk.Frame(self.realtime_tab)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # 温度图表
-        self.temp_fig, self.temp_ax = plt.subplots(figsize=(6, 3))
+        self.temp_fig, self.temp_ax = plt.subplots(figsize=(5, 3))
         self.temp_line, = self.temp_ax.plot([], [], 'b-')
         self.temp_ax.set_title("实时温度")
         self.temp_ax.set_ylabel("温度 (°C)")
         self.temp_ax.set_ylim(15, 35)
         self.temp_ax.grid(True)
 
-        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=frame)
-        self.temp_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=chart_frame)
+        self.temp_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # 照明图表
-        self.light_fig, self.light_ax = plt.subplots(figsize=(6, 3))
+        self.light_fig, self.light_ax = plt.subplots(figsize=(5, 3))
         self.light_bar = self.light_ax.bar([0], [80], width=0.6)
         self.light_ax.set_title("照明亮度")
         self.light_ax.set_ylabel("亮度 (%)")
         self.light_ax.set_ylim(0, 100)
         self.light_ax.grid(True)
 
-        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=frame)
-        self.light_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=chart_frame)
+        self.light_canvas.get_tk_widget().grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+
+        # 配置行列权重
+        chart_frame.grid_rowconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(1, weight=1)
 
     def setup_history_charts(self):
         """历史数据图表"""
@@ -232,13 +379,40 @@ class SmartHomeUI:
         self.notification_frame = ttk.Labelframe(self.root, text="系统通知")
         self.notification_frame.pack(fill=tk.X, padx=5, pady=5)
 
+        filter_frame = ttk.Frame(self.notification_frame)
+        filter_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
+
+        ttk.Button(filter_frame, text="全部",
+                   command=lambda: self.filter_notifications("all")).pack(side=tk.LEFT)
+        ttk.Button(filter_frame, text="信息",
+                   command=lambda: self.filter_notifications("info")).pack(side=tk.LEFT)
+        ttk.Button(filter_frame, text="警告",
+                   command=lambda: self.filter_notifications("warning")).pack(side=tk.LEFT)
+        ttk.Button(filter_frame, text="警报",
+                   command=lambda: self.filter_notifications("alert")).pack(side=tk.LEFT)
+
         self.notification_list = tk.Listbox(
             self.notification_frame, height=4,
             selectmode=tk.SINGLE, background="#f0f0f0")
         self.notification_list.pack(fill=tk.X, padx=5, pady=5)
 
+        filter_frame = ttk.Frame(self.notification_frame)
+        filter_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
+
         # 添加一些示例通知
+        self.all_notifications = []
         self.add_notification("系统启动", "info")
+
+    def filter_notifications(self, level):
+        """根据级别过滤通知"""
+        self.notification_list.delete(0, tk.END)
+        for msg in self.all_notifications:
+            if level == "all" or msg["level"] == level:
+                self.notification_list.insert(0, f"[{msg['time']}] {msg['text']}")
+                if msg["level"] == "warning":
+                    self.notification_list.itemconfig(0, {'fg': 'orange'})
+                elif msg["level"] == "alert":
+                    self.notification_list.itemconfig(0, {'fg': 'red'})
 
     def setup_mqtt(self):
         """设置MQTT连接"""
@@ -277,6 +451,22 @@ class SmartHomeUI:
 
         except json.JSONDecodeError:
             print("无效的JSON数据")
+
+    def setup_scene_controls(self):
+        """场景模式控制"""
+        frame = ttk.Labelframe(self.control_frame, text="场景模式")
+        frame.pack(fill=tk.X, padx=5, pady=5)
+
+        scenes = {
+            "居家模式": {"brightness": 80, "temp": 22, "lock": "locked"},
+            "睡眠模式": {"brightness": 20, "temp": 20, "lock": "locked"},
+            "离家模式": {"brightness": 0, "temp": 18, "lock": "locked"}
+        }
+
+        for name, settings in scenes.items():
+            btn = ttk.Button(frame, text=name,
+                             command=lambda s=settings: self.apply_scene(s))
+            btn.pack(side=tk.LEFT, padx=2)
 
     def queue_message(self, msg_type, data):
         """将消息放入队列供主线程处理"""
@@ -437,39 +627,46 @@ class SmartHomeUI:
             label.set_rotation(45)
 
     def plot_lighting_history(self, data):
-        """绘制照明历史图表"""
+        """绘制照明历史图表（亮度变化）"""
+        self.history_ax.clear()  # 清空原有图表
+
         if not data:
-            self.history_ax.text(0.5, 0.5, '无数据', ha='center')
+            self.history_ax.text(0.5, 0.5, '无照明数据', ha='center')
             return
 
+        # 解析数据：时间戳和亮度值（0-100%）
         timestamps = [datetime.strptime(row[1], '%Y-%m-%d %H:%M:%S') for row in data]
-        temps = [row[0] for row in data]
+        brightness = [row[0] for row in data]
 
-        # 计算移动平均
-        window_size = min(7, len(temps))
+        # 计算移动平均（7点）
+        window_size = min(7, len(brightness))
         if window_size > 1:
             weights = np.repeat(1.0, window_size) / window_size
-            ma = np.convolve(temps, weights, 'valid')
+            ma = np.convolve(brightness, weights, 'valid')
             ma_timestamps = timestamps[window_size - 1:]
-            self.history_ax.plot(ma_timestamps, ma, 'r-', label='7点移动平均', linewidth=2)
+            self.history_ax.plot(ma_timestamps, ma, 'm-', label='7点移动平均', linewidth=2)  # 品红色
 
-        # 绘制原始数据
-        self.history_ax.plot(timestamps, temps, 'b-', alpha=0.3, label='原始数据')
+        # 绘制原始亮度数据（紫色半透明）
+        self.history_ax.plot(timestamps, brightness, '#800080', alpha=0.3, label='原始亮度')
 
         # 添加统计信息
-        avg_temp = np.mean(temps)
-        max_temp = max(temps)
-        min_temp = min(temps)
-        self.history_ax.axhline(avg_temp, color='g', linestyle='--',
-                                label=f'平均 {avg_temp:.1f}°C')
+        avg_brightness = np.mean(brightness)
+        max_brightness = max(brightness)
+        min_brightness = min(brightness)
+        self.history_ax.axhline(avg_brightness, color='c', linestyle='--',
+                                label=f'平均 {avg_brightness:.1f}%')
 
-        self.history_ax.set_title(f"温度历史 (最高: {max_temp:.1f}°C, 最低: {min_temp:.1f}°C)")
-        self.history_ax.legend()
-        self.history_ax.grid(True)
+        # 设置图表属性
+        self.history_ax.set_ylim(0, 100)  # 亮度范围固定为0-100%
+        self.history_ax.set_title(f"照明亮度历史 (最高: {max_brightness}%, 最低: {min_brightness}%)")
+        self.history_ax.set_ylabel("亮度 (%)")
+        self.history_ax.legend(loc='upper right')
+        self.history_ax.grid(True, alpha=0.3)
 
-        # 旋转x轴标签
+        # 旋转x轴标签并自动调整间距
         for label in self.history_ax.get_xticklabels():
             label.set_rotation(45)
+        self.history_ax.figure.tight_layout()
 
     def plot_security_history(self, data):
         """绘制安全历史图表"""
@@ -490,6 +687,18 @@ class SmartHomeUI:
     def add_notification(self, message, level="info"):
         """添加系统通知"""
         now = datetime.now().strftime("%H:%M:%S")
+        notification = {
+            "time": now,
+            "text": message,
+            "level": level
+        }
+        self.all_notifications.insert(0, notification)
+
+        # 只显示当前过滤级别的通知
+        if hasattr(self, 'current_filter') and self.current_filter != "all":
+            if level != self.current_filter:
+                return
+
         self.notification_list.insert(0, f"[{now}] {message}")
 
         # 根据级别设置颜色
