@@ -1,327 +1,307 @@
 import paho.mqtt.client as mqtt
-import time
-import threading
-import matplotlib.pyplot as plt
-from temperature import TemperaturePublisher
-from lighting import LightingPublisher
-from security import SecurityPublisher
-from ui import SmartHomeUI
-import tkinter as tk
 import json
+import random
 import sqlite3
+import numpy as np
+import threading
+import time
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
 from datetime import datetime, timedelta
 
-# 配置常量（与其他模块一致）
-BROKER = 'test.mosquitto.org'
-PORT = 1883
-TEMPERATURE_TOPIC = "home/sensor/temperature"
-LIGHTING_TOPIC = "home/sensor/lighting"
-SECURITY_TOPIC = "home/security/status"
+
+class SecurityPublisher:
+    def __init__(self, client):
+        self.client = client
+        self.topic = "home/security/status"
+        self.data = {
+            "lock_status": "locked",
+            "noise_reduction": "enabled",
+            "time_of_day": self._get_time_of_day()
+        }
+
+        # 初始化机器学习模型
+        self.lock_model = RandomForestClassifier()
+        self.noise_model = RandomForestClassifier()
+        self._train_models()
+        self.room_type = "living_room"  # 可配置为 bedroom/kitchen等
+        self.occupancy = False
+        self.last_motion_time = time.time()
+
+    def _simulate_real_lighting(self):
+        now = datetime.now()
+        hour = now.hour + now.minute/60
+
+        # 基础光照 (考虑昼夜变化)
+        if 6 <= hour < 18:  # 白天
+            base_light = 80 + 40 * np.sin(np.pi*(hour-12)/12)
+        else:  # 夜晚
+            base_light = 10 + 5 * np.sin(np.pi*(hour-24)/12)
+
+        # 随机波动
+        random_effect = np.random.randint(-5, 5)
+
+        # 人体活动影响 (30%概率检测到活动)
+        motion_effect = 0
+        if np.random.random() < 0.3:
+            self.occupancy = True
+            self.last_motion_time = time.time()
+            motion_effect = 30 + np.random.randint(0, 20)
+        elif time.time() - self.last_motion_time > 300:  # 5分钟无活动
+            self.occupancy = False
+
+        # 房间类型调整
+        room_adjustments = {
+            'living_room': 5,
+            'bedroom': -10,
+            'kitchen': 15,
+            'bathroom': 0
+        }
+
+        brightness = base_light + random_effect
+        if self.occupancy:
+            brightness += motion_effect
+
+        brightness += room_adjustments[self.room_type]
+        return np.clip(brightness, 0, 100)
+
+    def publish(self):
+        # 使用现实模拟数据
+        self.data["brightness"] = int(self._simulate_real_lighting())
+
+        # 智能相机模式 (有人且亮度<30时切到night-vision)
+        if self.occupancy and self.data["brightness"] < 30:
+            self.data["camera_mode"] = "night-vision"
+        else:
+            self.data["camera_mode"] = "auto"
 
 
-class SmartHomeSystem:
-    def __init__(self):
-        # 初始化MQTT客户端（使用VERSION2）
-        self.client = mqtt.Client(
-            client_id="SmartHomeSystem",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2
-        )
-        self.client.on_connect = self.on_connect
-        self.client.on_message = self.on_message
+    def _get_time_of_day(self):
+        """获取当前时间段（早晨/白天/晚上/深夜）"""
+        hour = datetime.now().hour
+        if 5 <= hour < 9:
+            return "morning"
+        elif 9 <= hour < 18:
+            return "daytime"
+        elif 18 <= hour < 23:
+            return "evening"
+        else:
+            return "night"
 
-        # 初始化发布者
-        self.temp_pub = TemperaturePublisher(self.client)
-        self.light_pub = LightingPublisher(self.client)
-        self.security_pub = SecurityPublisher(self.client)
-
-        # 初始化数据库
-        self.setup_database()
-
-        # 创建Tkinter根窗口（但不立即显示）
-        self.root = tk.Tk()
-        self.root.withdraw()  # 隐藏主窗口
-
-        self.app = None
-        self.setup_database_maintenance()
-
-    def setup_database_maintenance(self):
-        """设置数据库定期维护"""
-
-        def db_maintenance():
-            while True:
-                self.optimize_database()
-                time.sleep(86400)  # 每天执行一次
-
-        threading.Thread(target=db_maintenance, daemon=True).start()
-
-    def optimize_database(self):
-        """优化数据库性能并清理旧数据"""
-        conn = sqlite3.connect('smart_home.db')
+    def _train_models(self):
+        """训练门锁和噪音抑制的预测模型"""
+        conn = None
         try:
+            conn = sqlite3.connect('smart_home.db')
             cursor = conn.cursor()
 
-            # 保留最近30天数据
-            cutoff = datetime.now() - timedelta(days=30)
+            # 检查是否有足够数据，否则生成模拟数据
+            cursor.execute("SELECT COUNT(*) FROM security_status")
+            count = cursor.fetchone()[0]
 
-            # 清理各表旧数据
-            for table in ['temperature', 'lighting', 'security_status']:
-                cursor.execute(f"DELETE FROM {table} WHERE timestamp < ?",
-                               (cutoff.strftime('%Y-%m-%d %H:%M:%S'),))
-            conn.commit()  # 先提交删除操作
+            if count < 50:
+                print("[Security] Generating synthetic training data")
+                # 使用更真实的模拟数据模式
+                simulated_data = []
+                for _ in range(100):
+                    hour = random.randint(0, 23)
+                    # 更复杂的逻辑规则
+                    is_weekday = random.random() < 0.7  # 70%概率是工作日
+                    lock_status = "unlocked" if (8 <= hour <= 20 and is_weekday) else "locked"
+                    noise_status = "enabled" if (hour >= 22 or hour <= 7) else "disabled"
+                    simulated_data.append((lock_status, noise_status, f"{hour:02d}:00:00"))
 
-            # 执行VACUUM优化
-            cursor.execute("VACUUM")
-            conn.commit()
+                # 批量插入提高效率
+                cursor.executemany(
+                    "INSERT INTO security_status (lock_status, noise_reduction, timestamp) VALUES (?, ?, datetime('now', ? || ' hours'))",
+                    [(d[0], d[1], f"-{random.randint(1, 30)}") for d in simulated_data]
+                )
+                conn.commit()
 
-            print("数据库维护完成: 清理旧数据并优化性能")
+            # 获取历史数据 - 添加更多特征
+            cursor.execute('''SELECT 
+                              lock_status, 
+                              noise_reduction, 
+                              strftime('%H', timestamp) as hour,
+                              strftime('%w', timestamp) as weekday  # 0-6, 0是周日
+                              FROM security_status''')
+            records = cursor.fetchall()
+
+            if not records:
+                raise ValueError("No training data available")
+
+            # 准备特征和标签 - 添加更多特征
+            X = np.array([
+                [int(row[2]), int(row[3])]  # 小时 + 星期几
+                for row in records
+            ])
+
+            y_lock = np.array([1 if row[0] == "unlocked" else 0 for row in records])
+            y_noise = np.array([1 if row[1] == "enabled" else 0 for row in records])
+
+            # 使用不同的随机状态分割数据集
+            X_train_lock, X_test_lock, y_train_lock, y_test_lock = train_test_split(
+                X, y_lock, test_size=0.2, random_state=42)
+
+            X_train_noise, X_test_noise, y_train_noise, y_test_noise = train_test_split(
+                X, y_noise, test_size=0.2, random_state=24)  # 不同的随机种子
+
+            # 训练和评估门锁模型
+            self.lock_model.fit(X_train_lock, y_train_lock)
+            lock_pred = self.lock_model.predict(X_test_lock)
+            lock_acc = accuracy_score(y_test_lock, lock_pred)
+            lock_report = classification_report(y_test_lock, lock_pred, target_names=["locked", "unlocked"])
+            print(f"[Security] Lock model accuracy: {lock_acc:.2f}")
+            print("Classification Report:\n", lock_report)
+
+            # 训练和评估噪音抑制模型
+            self.noise_model.fit(X_train_noise, y_train_noise)
+            noise_pred = self.noise_model.predict(X_test_noise)
+            noise_acc = accuracy_score(y_test_noise, noise_pred)
+            noise_report = classification_report(y_test_noise, noise_pred, target_names=["disabled", "enabled"])
+            print(f"[Security] Noise model accuracy: {noise_acc:.2f}")
+            print("Classification Report:\n", noise_report)
+
+            # 保存模型性能指标供后续使用
+            self.model_metrics = {
+                'lock': {'accuracy': lock_acc, 'report': lock_report},
+                'noise': {'accuracy': noise_acc, 'report': noise_report}
+            }
+
         except Exception as e:
-            print(f"数据库维护错误: {e}")
+            print(f"[Security] Error in model training: {str(e)}")
+            # 可以考虑回退到简单规则
+            self.fallback_to_rules = True
         finally:
-            conn.close()
+            if conn:
+                conn.close()
+    def _predict_security_settings(self):
+        """使用机器学习模型预测安全设置"""
+        if not hasattr(self, 'lock_model') or not hasattr(self, 'noise_model'):
+            # Default behavior when models aren't trained
+            self.data["lock_status"] = "locked" if datetime.now().hour > 22 or datetime.now().hour < 6 else "unlocked"
+            self.data["noise_reduction"] = "enabled"
+            return
 
-    def on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            print("Connected to MQTT Broker!")
-            # 订阅所有需要的主题
-            client.subscribe(TEMPERATURE_TOPIC)
-            client.subscribe(LIGHTING_TOPIC)
-            client.subscribe(SECURITY_TOPIC)
-        else:
-            print(f"Connection failed with code {rc}")
+        current_hour = datetime.now().hour
+
+        # 预测门锁状态
+        lock_prob = self.lock_model.predict_proba([[current_hour]])[0]
+        unlock_prob = lock_prob[1] if len(lock_prob) > 1 else 0.3  # 默认概率
+
+        # 预测噪音抑制
+        noise_prob = self.noise_model.predict_proba([[current_hour]])[0]
+        enable_prob = noise_prob[1] if len(noise_prob) > 1 else 0.7  # 默认概率
+
+        # 根据概率随机生成状态（加入随机性模拟真实场景）
+        self.data["lock_status"] = "unlocked" if random.random() < unlock_prob else "locked"
+        self.data["noise_reduction"] = "enabled" if random.random() < enable_prob else "disabled"
+        self.data["time_of_day"] = self._get_time_of_day()
+        self.data["prediction_confidence"] = {
+            "lock": float(unlock_prob),
+            "noise": float(enable_prob)
+        }
+
+    def publish(self):
+        # 使用机器学习模型预测状态（替代完全随机）
+        self._predict_security_settings()
+
+        try:
+            self.client.publish(self.topic, json.dumps(self.data))
+            print(f"[Security] Published: {self.data}")
+        except Exception as e:
+            print(f"[Security] Publish error: {e}")
+
+
+class SecuritySubscriber:
+    def __init__(self, client):
+        self.client = client
+        self.topic = "home/security/status"
+        self.client.message_callback_add(self.topic, self.on_message)
+        self.setup_db()
+
+        # 初始化分析功能
+        self._setup_analysis()
+
+    def setup_db(self):
+        self.conn = sqlite3.connect('smart_home.db')
+        self.cursor = self.conn.cursor()
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS security_status (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            lock_status TEXT,
+                            noise_reduction TEXT,
+                            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+        self.conn.commit()
+
+    def _setup_analysis(self):
+        """设置定期分析安全模式的功能"""
+        self.analysis_timer = None
+        self._schedule_next_analysis()
+
+    def _schedule_next_analysis(self):
+        """安排下一次分析任务（每6小时一次）"""
+        if self.analysis_timer is not None:
+            self.analysis_timer.cancel()
+
+        self.analysis_timer = threading.Timer(6 * 3600, self._analyze_patterns)
+        self.analysis_timer.start()
+
+    def _analyze_patterns(self):
+        """分析历史数据中的安全模式"""
+        try:
+            # 获取过去7天的数据
+            cutoff = datetime.now() - timedelta(days=7)
+            self.cursor.execute('''SELECT lock_status, noise_reduction, 
+                                  strftime('%H', timestamp) as hour 
+                                  FROM security_status 
+                                  WHERE timestamp > ?''', (cutoff,))
+            records = self.cursor.fetchall()
+
+            if len(records) > 20:
+                # 分析最常见的模式组合
+                from collections import Counter
+                patterns = Counter((r[0], r[1], int(r[2]) // 6) for r in records)  # 按4小时分段
+                common_pattern = patterns.most_common(1)[0][0]
+                print(f"[Security] Most common pattern: "
+                      f"Lock={common_pattern[0]}, Noise={common_pattern[1]}, "
+                      f"Time={common_pattern[2] * 6}-{(common_pattern[2] + 1) * 6}h")
+
+            # 重新安排下一次分析
+            self._schedule_next_analysis()
+
+        except Exception as e:
+            print(f"[Security] Pattern analysis error: {e}")
 
     def on_message(self, client, userdata, msg):
-        """处理所有订阅消息"""
         try:
-            payload = msg.payload.decode()
-            topic = msg.topic
+            data = json.loads(msg.payload.decode('utf-8'))
+            print(f"[Security] Received: {data}")
 
-            # 尝试解析JSON，如果失败则作为原始数据处理
-            try:
-                data = json.loads(payload)
-                if not isinstance(data, dict):  # 如果不是字典，转换为标准格式
-                    if topic == TEMPERATURE_TOPIC:
-                        data = {"temperature": float(data), "comfort_level": "optimal"}
-                    elif topic == LIGHTING_TOPIC:
-                        data = {"brightness": int(data), "camera_mode": "auto"}
-                    elif topic == SECURITY_TOPIC:
-                        data = {"lock_status": "locked" if bool(data) else "unlocked",
-                                "noise_reduction": "enabled"}
-            except json.JSONDecodeError:
-                # 如果不是JSON，根据主题转换为相应格式
-                if topic == TEMPERATURE_TOPIC:
-                    data = float(payload)
-                elif topic == LIGHTING_TOPIC:
-                    data = int(payload)
-                elif topic == SECURITY_TOPIC:
-                    data = bool(payload)
+            # 存储到数据库
+            self.cursor.execute("INSERT INTO security_status (lock_status, noise_reduction) VALUES (?, ?)",
+                                (data['lock_status'], data['noise_reduction']))
+            self.conn.commit()
 
-            # 根据主题路由到不同处理逻辑
-            if topic == TEMPERATURE_TOPIC:
-                self.handle_temperature_data(data)
-                # 传递给UI
-                if hasattr(self, 'ui_queue'):
-                    self.ui_queue.put(("update_temperature", data))
-            elif topic == LIGHTING_TOPIC:
-                self.handle_lighting_data(data)
-                if hasattr(self, 'ui_queue'):
-                    self.ui_queue.put(("update_lighting", data))
-            elif topic == SECURITY_TOPIC:
-                self.handle_security_data(data)
-                if hasattr(self, 'ui_queue'):
-                    self.ui_queue.put(("update_security", data))
+            # 检查异常模式（可选）
+            self._check_anomalies(data)
 
+        except json.JSONDecodeError:
+            print(f"[Security] Invalid data received")
         except Exception as e:
-            print(f"Error processing message on {msg.topic}: {e}")
+            print(f"[Security] Database error: {e}")
 
-    def handle_temperature_data(self, data):
-        """处理温度数据并存入数据库"""
-        if isinstance(data, (int, float)):
-            data = {"temperature": data, "comfort_level": "optimal"}
+    def _check_anomalies(self, data):
+        """检查异常安全状态（如深夜解锁）"""
+        hour = datetime.now().hour
+        if data['lock_status'] == "unlocked" and (hour < 6 or hour > 23):
+            print(f"[Security] Warning: Unusual unlock detected at night ({hour}:00)")
 
-        conn = sqlite3.connect('smart_home.db')
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO temperature (temperature, comfort_level) VALUES (?, ?)",
-            (data['temperature'], data['comfort_level'])
-        )
-        conn.commit()
-        conn.close()
+        if data['noise_reduction'] == "disabled" and (hour > 22 or hour < 8):
+            print(f"[Security] Warning: Noise reduction disabled during quiet hours")
 
-    def handle_lighting_data(self, data):
-        """处理照明数据并存入数据库"""
-        conn = sqlite3.connect('smart_home.db')
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO lighting (brightness, camera_mode) VALUES (?, ?)",
-            (data['brightness'], data['camera_mode'])
-        )
-        conn.commit()
-        conn.close()
-
-    def handle_security_data(self, data):
-        """处理安全数据并存入数据库"""
-        conn = sqlite3.connect('smart_home.db')
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO security_status (lock_status, noise_reduction) VALUES (?, ?)",
-            (data['lock_status'], data['noise_reduction'])
-        )
-        conn.commit()
-        conn.close()
-
-    def setup_database(self):
-        """初始化数据库表结构（与文档3一致）"""
-        conn = sqlite3.connect('smart_home.db')
-        cursor = conn.cursor()
-
-        cursor.execute('''CREATE TABLE IF NOT EXISTS temperature (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        temperature REAL,
-                        comfort_level TEXT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-        cursor.execute('''CREATE TABLE IF NOT EXISTS lighting (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        brightness INTEGER,
-                        camera_mode TEXT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-        cursor.execute('''CREATE TABLE IF NOT EXISTS security_status (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        lock_status TEXT,
-                        noise_reduction TEXT,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-
-        conn.commit()
-        conn.close()
-
-    def on_mqtt_message(self, client, userdata, msg):
-        try:
-            payload = msg.payload.decode()
-            topic = msg.topic
-
-            try:
-                data = json.loads(payload)
-                if not isinstance(data, dict):
-                    # 根据 topic 决定如何转换非字典数据
-                    if topic.endswith("temperature"):
-                        data = {"temperature": float(data), "comfort_level": "optimal"}
-                    elif topic.endswith("brightness"):
-                        data = {"brightness": int(data), "camera_mode": "auto"}
-                    else:
-                        print(f"未知的非字典数据: {payload}")
-                        return
-
-            except ValueError:
-                # 如果不是 JSON，尝试按 topic 解析
-                try:
-                    if topic.endswith("temperature"):
-                        data = {"temperature": float(payload), "comfort_level": "optimal"}
-                    elif topic.endswith("brightness"):
-                        data = {"brightness": int(payload), "camera_mode": "auto"}
-                    else:
-                        print(f"无法解析的数据: {payload}")
-                        return
-                except (ValueError, TypeError):
-                    print(f"无效的数值格式: {payload}")
-                    return
-
-            # 处理有效数据
-            self.handle_data(topic, data)
-
-        except Exception as e:
-            print(f"消息处理错误: {e}")
-
-    def start_ui(self):
-        """启动UI界面"""
-        # 确保在主线程中创建UI
-        def _start_ui():
-            # 创建UI实例
-            app = SmartHomeUI(self.root)
-            # 显示主窗口
-            self.root.deiconify()
-            app.run()
-
-        if threading.current_thread() is threading.main_thread():
-            _start_ui()
-        else:
-            self.root.after(0, _start_ui)
-
-    def run(self):
-        """Main execution loop"""
-        try:
-            # 连接MQTT
-            self.client.connect(BROKER, PORT, 60)
-            self.client.loop_start()
-
-            # 在主线程创建UI
-            self.root.deiconify()
-            self.app = SmartHomeUI(self.root)
-
-            # 在主线程中启动UI
-            self.start_ui()
-
-            # 设置定时发布
-            self.setup_publish_timer()
-
-            # 进入主循环
-            self.root.mainloop()
-
-        except KeyboardInterrupt:
-            print("\nShutting down gracefully...")
-        except Exception as e:
-            print(f"Error: {e}")
-        finally:
-            self.client.loop_stop()
-            self.client.disconnect()
-            if hasattr(self, 'root') and self.root:
-                self.root.quit()
-
-    def publish_loop(self):
-        """独立的发布循环"""
-        while True:
-            self.temp_pub.publish()
-            self.light_pub.publish()
-            self.security_pub.publish()
-            time.sleep(10)
-
-    def shutdown(self):
-        """关闭应用程序"""
-        if hasattr(self, 'root') and self.root:
-            self.root.quit()
-        if hasattr(self, 'client') and self.client:
-            self.client.disconnect()
-        plt.close('all')
-        if hasattr(self, 'conn'):
-            self.conn.close()
-
-    def setup_publish_timer(self):
-        """设置定期发布数据的定时器"""
-
-        def publish():
-            try:
-                self.temp_pub.publish()
-                self.light_pub.publish()
-                self.security_pub.publish()
-            except Exception as e:
-                print(f"Publish error: {e}")
-            finally:
-                # 10秒后再次执行
-                self.root.after(10000, publish)
-
-        # 立即开始
-        self.root.after(0, publish)
-
-
-if __name__ == "__main__":
-    # 创建系统实例
-    system = SmartHomeSystem()
-
-    try:
-        # 运行系统
-        system.run()
-    except KeyboardInterrupt:
-        print("\nApplication terminated by user")
-    finally:
-        # 确保资源清理
-        system.shutdown()
+    def __del__(self):
+        """清理资源"""
+        if self.analysis_timer is not None:
+            self.analysis_timer.cancel()
+        self.conn.close()
