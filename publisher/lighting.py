@@ -30,7 +30,6 @@ class LightingPublisher:
         self.occupancy = False
         self.last_motion_time = time.time()
         self.scaler = StandardScaler()
-        self.model = LinearRegression()
 
     def _simulate_real_lighting(self):
         now = datetime.now()
@@ -68,16 +67,6 @@ class LightingPublisher:
 
         brightness += room_adjustments[self.room_type]
         return np.clip(brightness, 0, 100)
-
-    def publish(self):
-        # 使用现实模拟数据
-        self.data["brightness"] = int(self._simulate_real_lighting())
-
-        # 智能相机模式 (有人且亮度<30时切到night-vision)
-        if self.occupancy and self.data["brightness"] < 30:
-            self.data["camera_mode"] = "night-vision"
-        else:
-            self.data["camera_mode"] = "auto"
 
     def train_model(self):
         hours = np.random.randint(0, 24, 1000)
