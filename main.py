@@ -67,6 +67,7 @@ class SmartHomeSystem:
             for table in ['temperature', 'lighting', 'security_status']:
                 cursor.execute(f"DELETE FROM {table} WHERE timestamp < ?",
                                (cutoff.strftime('%Y-%m-%d %H:%M:%S'),))
+            conn.commit()  # 先提交删除操作
 
             # 执行VACUUM优化
             cursor.execute("VACUUM")
