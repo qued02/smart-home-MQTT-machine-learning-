@@ -2,6 +2,7 @@ import paho.mqtt.client as mqtt
 import time
 import threading
 import matplotlib.pyplot as plt
+import ssl
 from temperature import TemperaturePublisher
 from lighting import LightingPublisher
 from security import SecurityPublisher
@@ -13,7 +14,7 @@ from datetime import datetime, timedelta
 
 # 配置常量（与其他模块一致）
 BROKER = 'test.mosquitto.org'
-PORT = 1883
+PORT = 8883
 TEMPERATURE_TOPIC = "home/sensor/temperature"
 LIGHTING_TOPIC = "home/sensor/lighting"
 SECURITY_TOPIC = "home/security/status"
@@ -24,8 +25,22 @@ class SmartHomeSystem:
         # 初始化MQTT客户端（使用VERSION2）
         self.client = mqtt.Client(
             client_id="SmartHomeSystem",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            protocol = mqtt.MQTTv311  # 明确指定协议版本
         )
+        try:
+            self.client.tls_set(
+                ca_certs="mosquitto.org.crt",
+                cert_reqs=ssl.CERT_REQUIRED,
+                tls_version=ssl.PROTOCOL_TLSv1_2
+            )
+            # 可选：设置TLS不安全的警告（仅用于测试）
+            # self.client.tls_insecure_set(True)
+        except Exception as e:
+            print(f"TLS配置错误: {e}")
+            raise
+
+            # 设置回调
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
@@ -269,8 +284,11 @@ class SmartHomeSystem:
 
         except KeyboardInterrupt:
             print("\nShutting down gracefully...")
+        except ssl.SSLError as e:
+            print(f"SSL错误: {e}")
+            # 处理证书验证失败等情况
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"错误: {e}")
         finally:
             self.client.loop_stop()
             self.client.disconnect()
