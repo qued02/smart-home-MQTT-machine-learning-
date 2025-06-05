@@ -3,9 +3,9 @@ import time
 import threading
 import matplotlib.pyplot as plt
 import ssl
-from temperature import TemperaturePublisher
-from lighting import LightingPublisher
-from security import SecurityPublisher
+from publisher.temperature import TemperaturePublisher
+from publisher.lighting import LightingPublisher
+from publisher.security import SecurityPublisher
 from ui import SmartHomeUI
 import tkinter as tk
 import json
@@ -25,7 +25,8 @@ class SmartHomeSystem:
         # 初始化MQTT客户端（使用VERSION2）
         self.client = mqtt.Client(
             client_id="SmartHomeSystem",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            # callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            # paho-mqtt版本1.6.0不需要这行配置，版本1.5.0及以下需要
             protocol = mqtt.MQTTv311  # 明确指定协议版本
         )
         try:
