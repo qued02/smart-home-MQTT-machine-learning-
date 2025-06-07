@@ -11,6 +11,7 @@ import tkinter as tk
 import json
 import sqlite3
 from datetime import datetime, timedelta
+import random
 
 # 配置常量（与其他模块一致）
 BROKER = 'test.mosquitto.org'
@@ -25,7 +26,7 @@ class SmartHomeSystem:
         # 初始化MQTT客户端（使用VERSION2）
         self.client = mqtt.Client(
             client_id="SmartHomeSystem",
-            # callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             # paho-mqtt版本1.6.0不需要这行配置，版本1.5.0及以下需要
             protocol = mqtt.MQTTv311  # 明确指定协议版本
         )
@@ -319,16 +320,36 @@ class SmartHomeSystem:
 
         def publish():
             try:
+                # 调用各Publisher的模拟方法生成新数据
+                self.temp_pub.data = {
+                    "temperature": self.temp_pub._simulate_real_temperature(),
+                    "comfort_level": "optimal",
+                    "anomaly": False
+                }
+
+                self.light_pub.data = {
+                    "brightness": self.light_pub._simulate_real_lighting(),
+                    "camera_mode": random.choice(["auto", "manual", "off"])
+                }
+
+                # 更新安全数据
+                sensor_data = self.security_pub._simulate_security_sensors()
+                self.security_pub.data.update(sensor_data)
+
+                # 发布数据
                 self.temp_pub.publish()
-                self.light_pub.publish()
-                self.security_pub.publish()
+                if time.time() % 3 < 0.1:
+                    self.light_pub.publish()
+                if time.time() % 2 < 0.1:
+                    self.security_pub.publish()
+
             except Exception as e:
                 print(f"Publish error: {e}")
             finally:
-                # 10秒后再次执行
-                self.root.after(10000, publish)
+                # 1秒后再次执行，加快更新频率
+                self.root.after(1000, publish)
 
-        # 立即开始
+        # 立即开始，间隔1秒
         self.root.after(0, publish)
 
 
