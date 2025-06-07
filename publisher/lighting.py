@@ -18,6 +18,8 @@ class LightingPublisher:
             "brightness": 80,
             "camera_mode": "auto"
         }
+        self.previous_brightness = 80  # 添加前一个亮度值
+        self.smoothing_factor = 0.3  # 平滑系数(0-1之间)
 
         # 新增的机器学习模型部分
         self.model = LinearRegression()
@@ -61,12 +63,24 @@ class LightingPublisher:
             'bathroom': 0
         }
 
-        brightness = base_light + random_effect
-        if self.occupancy:
-            brightness += motion_effect
+        raw_brightness = base_light + random_effect + motion_effect + room_adjustments[self.room_type]
 
-        brightness += room_adjustments[self.room_type]
-        return np.clip(brightness, 0, 100)
+        # 应用平滑处理
+        smoothed_brightness = (self.smoothing_factor * raw_brightness +
+                               (1 - self.smoothing_factor) * self.previous_brightness)
+        max_change = 5
+        if abs(raw_brightness - self.previous_brightness) > max_change:
+            if raw_brightness > self.previous_brightness:
+                smoothed_brightness = self.previous_brightness + max_change
+            else:
+                smoothed_brightness = self.previous_brightness - max_change
+        else:
+            smoothed_brightness = raw_brightness
+
+        # 更新前一个亮度值
+        self.previous_brightness = smoothed_brightness
+
+        return np.clip(smoothed_brightness, 0, 100)
 
     def train_model(self):
         hours = np.random.randint(0, 24, 1000)
