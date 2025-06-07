@@ -74,19 +74,17 @@ class TemperaturePublisher:
         return round(temp, 1)
 
     def publish(self):
-        # 使用现实模拟替代随机生成
+        """合并后的发布方法，包含温度模拟、预测和异常检测"""
+        # 生成新温度数据
         real_temp = self._simulate_real_temperature()
-        self.data["temperature"] = real_temp
+        predicted_temp = self.predict_next_temperature(real_temp)
 
-        # 根据实际温度设置舒适度
-        if real_temp < 18:
-            self.data["comfort_level"] = "cold"
-        elif 18 <= real_temp < 24:
-            self.data["comfort_level"] = "optimal"
-        elif 24 <= real_temp < 28:
-            self.data["comfort_level"] = "warm"
-        else:
-            self.data["comfort_level"] = "hot"
+        # 更新数据字典
+        self.data = {
+            "temperature": predicted_temp,
+            "comfort_level": "optimal" if predicted_temp < self.temperature_threshold else "high",
+            "anomaly": bool(self.detect_anomaly(predicted_temp))
+        }
 
         try:
             # QoS 1 - 至少交付一次（确保温度数据不丢失）
@@ -97,6 +95,18 @@ class TemperaturePublisher:
                 retain=True  # 保留最后一条消息给新订阅者
             )
             print(f"[Temperature] Published (QoS 1): {self.data}")
+
+            # 异常和高温警告
+            if self.data["anomaly"]:
+                alert = f"ANOMALY DETECTED! Temperature: {predicted_temp:.1f}°C"
+                print(alert)
+            elif predicted_temp > self.temperature_threshold:
+                alert = f"High temperature warning! Current: {predicted_temp:.1f}°C"
+                print(alert)
+
+            # 根据情况调整发布间隔
+            time.sleep(5 if (self.data["anomaly"] or predicted_temp > self.temperature_threshold) else 1)
+
         except Exception as e:
             print(f"[Temperature] Publish error: {e}")
 
@@ -142,32 +152,6 @@ class TemperaturePublisher:
         """简单预测下一个温度值（示例用线性预测）"""
         # 实际项目中可以用更复杂的时序模型如ARIMA、LSTM等
         return current_temp + random.uniform(-0.5, 0.5)
-
-    def publish(self):
-        # 生成新数据（包含机器学习预测）
-        predicted_temp = self.predict_next_temperature(self.data["temperature"])
-        self.data["temperature"] = predicted_temp
-        self.data["comfort_level"] = "optimal" if predicted_temp < self.temperature_threshold else "high"
-
-        # 异常检测
-        self.data["anomaly"] = bool(self.detect_anomaly(predicted_temp))
-
-        try:
-            self.client.publish(self.topic, json.dumps(self.data))
-            print(f"[Temperature] Published: {self.data}")
-
-            # 异常和高温警告
-            if self.data["anomaly"]:
-                alert = f"ANOMALY DETECTED! Temperature: {predicted_temp:.1f}°C"
-                print(alert)
-            elif predicted_temp > self.temperature_threshold:
-                alert = f"High temperature warning! Current: {predicted_temp:.1f}°C"
-                print(alert)
-
-            time.sleep(5 if (self.data["anomaly"] or predicted_temp > self.temperature_threshold) else 1)
-
-        except Exception as e:
-            print(f"[Temperature] Publish error: {e}")
 
 
 class TemperatureSubscriber:
