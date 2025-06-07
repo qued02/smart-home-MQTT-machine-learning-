@@ -27,6 +27,13 @@ class SmartHomeUI:
         self.root.title("MQTT智能家居控制系统")
         self.root.geometry("1200x800")
 
+        self.temp_data = [22.0]
+        self.light_data = [50]
+        self.security_data = ["locked"]
+        self.temp_timestamps = []
+        self.light_timestamps = []
+        self.security_timestamps = []
+
         # 使用与其他模块一致的MQTT配置
         self.broker = "test.mosquitto.org"
         self.port = 8883
@@ -79,15 +86,19 @@ class SmartHomeUI:
         self.control_frame = ttk.Labelframe(self.main_panel, text="设备控制", width=300)
         self.main_panel.add(self.control_frame)
 
-        # 右侧数据显示区域
+        # 右侧显示区域 - 先创建容器
         self.display_frame = ttk.Frame(self.main_panel)
         self.main_panel.add(self.display_frame)
 
-        # 初始化各组件
+        # 创建专门放置图表的frame
+        self.chart_frame = ttk.Frame(self.display_frame)  # 添加这行
+        self.chart_frame.pack(fill=tk.BOTH, expand=True)  # 添加这行
+
+        # 然后初始化各组件
         self.setup_temperature_controls()
         self.setup_lighting_controls()
         self.setup_security_controls()
-        self.setup_display_area()
+        self.setup_display_area()  # 这里会调用setup_realtime_charts()
         self.setup_notification_area()
 
     def setup_themes(self):
@@ -311,36 +322,124 @@ class SmartHomeUI:
         self.setup_history_charts()
 
     def setup_realtime_charts(self):
-        """实时数据图表"""
-        chart_frame = ttk.Frame(self.realtime_tab)
-        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        """实时数据图表 - 动态版本"""
+        # 确保chart_frame存在
+        if not hasattr(self, 'chart_frame'):
+            self.chart_frame = ttk.Frame(self.display_frame)
+            self.chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # 清除可能存在的旧图表
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
 
         # 温度图表
         self.temp_fig, self.temp_ax = plt.subplots(figsize=(5, 3))
         self.temp_line, = self.temp_ax.plot([], [], 'b-')
-        self.temp_ax.set_title("实时温度")
+        self.temp_ax.set_title("实时温度 (动态)")
         self.temp_ax.set_ylabel("温度 (°C)")
         self.temp_ax.set_ylim(15, 35)
+        self.temp_ax.set_xlim(0, 60)
         self.temp_ax.grid(True)
 
-        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=chart_frame)
+        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=self.chart_frame)
         self.temp_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # 照明图表
+        # 清空旧数据
+        if hasattr(self, 'light_data'):
+            self.light_data.clear()
+        else:
+            self.light_data = []
+
+        # 重新初始化图表
+        if hasattr(self, 'light_canvas'):
+            self.light_canvas.get_tk_widget().destroy()
+
         self.light_fig, self.light_ax = plt.subplots(figsize=(5, 3))
-        self.light_bar = self.light_ax.bar([0], [80], width=0.6)
-        self.light_ax.set_title("照明亮度")
+        self.light_line, = self.light_ax.plot([], [], 'g-')
+        self.light_ax.set_title("照明亮度 (动态)")
         self.light_ax.set_ylabel("亮度 (%)")
         self.light_ax.set_ylim(0, 100)
+        self.light_ax.set_xlim(0, 60)
         self.light_ax.grid(True)
 
-        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=chart_frame)
+        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=self.chart_frame)
         self.light_canvas.get_tk_widget().grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
+        print("[DEBUG] 照明图表已重新初始化")  # 调试输出
+
+        # 安全状态图表
+        self.security_fig, self.security_ax = plt.subplots(figsize=(5, 3))
+        self.security_line, = self.security_ax.plot([], [], 'r-', marker='o')  # 改为折线图
+        self.security_ax.set_title("安全状态 (动态)")
+        self.security_ax.set_yticks([0, 1])
+        self.security_ax.set_yticklabels(["锁定", "解锁"])
+        self.security_ax.set_ylim(-0.5, 1.5)
+        self.security_ax.set_xlim(0, 60)
+        self.security_ax.grid(True)
+
+        self.security_canvas = FigureCanvasTkAgg(self.security_fig, master=self.chart_frame)
+        self.security_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+
         # 配置行列权重
-        chart_frame.grid_rowconfigure(0, weight=1)
-        chart_frame.grid_columnconfigure(0, weight=1)
-        chart_frame.grid_columnconfigure(1, weight=1)
+        self.chart_frame.grid_rowconfigure(0, weight=1)
+        self.chart_frame.grid_rowconfigure(1, weight=1)
+        self.chart_frame.grid_columnconfigure(0, weight=1)
+        self.chart_frame.grid_columnconfigure(1, weight=1)
+
+        # 启动动态更新
+        self.start_dynamic_updates()
+
+    def start_dynamic_updates(self):
+        """启动动态图表更新"""
+
+        def update_charts():
+            try:
+                # 更新温度图表
+                if len(self.temp_data) > 0:
+                    self.temp_line.set_data(range(len(self.temp_data)), self.temp_data)
+                    self.temp_ax.relim()
+                    self.temp_ax.autoscale_view(scalex=False, scaley=True)
+                    self.temp_canvas.draw()
+
+                # 更新照明图表
+                if hasattr(self, 'light_data') and self.light_data:
+                    x_data = range(len(self.light_data))
+                    self.light_line.set_data(x_data, self.light_data)
+
+                    # 调整坐标轴范围
+                    self.light_ax.set_xlim(0, max(60, len(self.light_data) + 5))
+                    self.light_ax.relim()
+                    self.light_ax.autoscale_view(scalex=False, scaley=True)
+
+                    # 强制重绘
+                    self.light_canvas.draw()
+                    print("[DEBUG] 照明图表已更新")  # 调试输出
+
+                # 更新安全图表
+                if hasattr(self, 'security_data') and len(self.security_data) > 0:
+                    self.security_ax.clear()
+                    markerline, stemlines, baseline = self.security_ax.stem(
+                        range(len(self.security_data)),
+                        [1 if s == "unlocked" else 0 for s in self.security_data],
+                        linefmt='C3-',
+                        markerfmt='C3o',
+                        basefmt='C0-'
+                    )
+                    self.security_ax.set_title("安全状态 (动态)")
+                    self.security_ax.set_yticks([0, 1])
+                    self.security_ax.set_yticklabels(["锁定", "解锁"])
+                    self.security_ax.set_ylim(-0.5, 1.5)
+                    self.security_ax.set_xlim(0, 60)
+                    self.security_ax.grid(True)
+                    self.security_canvas.draw()
+
+            except Exception as e:
+                print(f"更新图表时出错: {e}")
+            finally:
+                self.root.after(500, update_charts)
+
+        update_charts()
 
     def setup_history_charts(self):
         """历史数据图表"""
@@ -520,45 +619,70 @@ class SmartHomeUI:
         self.current_data["temperature"] = temp_data
         self.temp_var.set(f"{temp_data['temperature']:.1f} °C")
 
-        # 更新温度图表（保持不变）
-        temp = temp_data["temperature"]
-        self.temp_line.set_data([0, 1], [temp, temp])
-        self.temp_ax.relim()
-        self.temp_ax.autoscale_view()
-        self.temp_canvas.draw()
+        # 添加到动态图表数据
+        self.temp_data.append(temp_data['temperature'])
+        if len(self.temp_data) > 60:
+            self.temp_data.pop(0)
 
         # 检查温度警告
         if "comfort_level" in temp_data and temp_data["comfort_level"] == "high":
-            self.add_notification(f"高温警告: {temp}°C", "warning")
+            self.add_notification(f"高温警告: {temp_data['temperature']}°C", "warning")
 
         self.update_last_update_time()
 
     def update_lighting_data(self, data):
-        """更新照明数据"""
-        self.current_data["lighting"] = data
-        self.brightness_slider.set(data["brightness"])
-        self.camera_mode.set(data["camera_mode"])
+        """增强兼容性的照明数据更新"""
+        print(f"[DEBUG] 收到照明数据: {data}")  # 调试输出
 
-        # 更新照明图表
-        for rect in self.light_bar:
-            rect.set_height(data["brightness"])
-        self.light_ax.relim()
-        self.light_ax.autoscale_view()
-        self.light_canvas.draw()
+        try:
+            if isinstance(data, (int, float)):
+                data = {"brightness": int(data), "camera_mode": "auto"}
 
-        self.update_last_update_time()
+            # 确保数据列表存在
+            if not hasattr(self, 'light_data'):
+                self.light_data = []
+                print("[DEBUG] 初始化light_data列表")
+
+            # 添加新数据点
+            brightness = data.get("brightness", 0)
+            self.light_data.append(brightness)
+
+            # 限制数据点数量
+            if len(self.light_data) > 60:
+                self.light_data.pop(0)
+
+            print(f"[DEBUG] 当前照明数据点: {len(self.light_data)}")  # 调试输出
+
+            # 更新UI控件
+            self.brightness_slider.set(brightness)
+            self.camera_mode.set(data.get("camera_mode", "auto"))
+
+        except Exception as e:
+            print(f"[DEBUG] 更新照明数据时出错: {e}")
 
     def update_security_data(self, data):
-        """更新安全数据"""
-        self.current_data["security"] = data
-        self.lock_var.set(data["lock_status"])
-        self.noise_var.set(data["noise_reduction"])
+        """增强兼容性的安全数据更新"""
+        try:
+            if isinstance(data, bool):
+                data = {"lock_status": "unlocked" if data else "locked",
+                        "noise_reduction": "enabled"}
 
-        # 检查门锁状态变化
-        if data["lock_status"] == "unlocked":
-            self.add_notification("门锁已解锁", "alert")
+            print(f"更新安全数据: {data}")  # 调试打印
 
-        self.update_last_update_time()
+            self.current_data["security"] = data
+            self.lock_var.set(data.get("lock_status", "locked"))
+            self.noise_var.set(data.get("noise_reduction", "enabled"))
+
+            # 确保数据列表已初始化
+            if not hasattr(self, 'security_data'):
+                self.security_data = []
+
+            self.security_data.append(data.get("lock_status", "locked"))
+            if len(self.security_data) > 60:
+                self.security_data.pop(0)
+
+        except Exception as e:
+            print(f"更新安全数据时出错: {e}")
 
     def update_last_update_time(self):
         """更新最后更新时间"""
@@ -693,35 +817,47 @@ class SmartHomeUI:
 
     def plot_security_history(self, data):
         """绘制安全历史图表"""
+        self.history_ax.clear()
+
         if not data:  # 检查数据是否为空
-            self.history_ax.clear()
             self.history_ax.text(0.5, 0.5, '无安全数据', ha='center')
             self.history_canvas.draw()
             return
 
-        timestamps = [row[1] for row in data]
-        lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
+        try:
+            timestamps = [row[1] for row in data]
+            lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
 
-        self.history_ax.clear()  # 先清空图表
+            # 修改后的stem调用方式（移除use_line_collection参数）
+            markerline, stemlines, baseline = self.history_ax.stem(
+                range(len(timestamps)),
+                lock_status,
+                linefmt='C3-',  # 线条颜色
+                markerfmt='C3o',  # 标记样式
+                basefmt='C0-'  # 基线样式
+            )
 
-        # 使用更兼容的绘图方式
-        markerline, stemlines, baseline = self.history_ax.stem(
-            range(len(timestamps)), lock_status, use_line_collection=True)
+            # 设置x轴标签为时间
+            self.history_ax.set_xticks(range(len(timestamps)))
+            self.history_ax.set_xticklabels(timestamps)
 
-        # 设置x轴标签为时间
-        self.history_ax.set_xticks(range(len(timestamps)))
-        self.history_ax.set_xticklabels(timestamps)
+            self.history_ax.set_title("门锁状态历史")
+            self.history_ax.set_yticks([0, 1])
+            self.history_ax.set_yticklabels(["锁定", "解锁"])
+            self.history_ax.grid(True)
 
-        self.history_ax.set_title("门锁状态历史")
-        self.history_ax.set_yticks([0, 1])
-        self.history_ax.set_yticklabels(["锁定", "解锁"])
-        self.history_ax.grid(True)
+            # 旋转x轴标签
+            for label in self.history_ax.get_xticklabels():
+                label.set_rotation(45)
 
-        # 旋转x轴标签
-        for label in self.history_ax.get_xticklabels():
-            label.set_rotation(45)
+            self.history_ax.figure.tight_layout()
+            self.history_canvas.draw()
 
-        self.history_ax.figure.tight_layout()
+        except Exception as e:
+            print(f"绘制安全历史图表错误: {e}")
+            self.history_ax.clear()
+            self.history_ax.text(0.5, 0.5, f'错误: {str(e)}', ha='center')
+            self.history_canvas.draw()
 
     def add_notification(self, message, level="info"):
         """添加系统通知"""
