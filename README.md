@@ -62,7 +62,7 @@ python main.py
 ## 📌 Module Highlights
 
 ### `main.py` - System Controller
-
+done by Kaimin Wu
 - Establishes secure MQTT connection (TLS)
 - Initializes 3 simulated sensor publishers:
   - Temperature (value + comfort level)
@@ -73,7 +73,7 @@ python main.py
 - Daily database cleanup and optimization
 
 ### `ui.py` - User Interface
-
+done by Kaimin Wu
 - Built using `tkinter + ttkbootstrap`
 - Features:
   - Sliders for temperature and lighting
