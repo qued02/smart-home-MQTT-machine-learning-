@@ -155,5 +155,5 @@ For suggestions, issues, or collaborations:
 
 > 📧 wuk23@coventry.ac  
 > 📌 GitHub: https://github.com/boin-go
-> > 📧 qus6@coventry.ac  
+>  📧 qus6@coventry.ac  
 > 📌 GitHub: https://github.com/qued02
