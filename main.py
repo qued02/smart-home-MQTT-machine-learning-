@@ -16,7 +16,7 @@ import queue
 
 # 配置常量（与其他模块一致）
 BROKER = 'test.mosquitto.org'
-PORT = 1883  # 使用非SSL端口
+PORT = 8883
 TEMPERATURE_TOPIC = "home/sensor/temperature"
 LIGHTING_TOPIC = "home/sensor/lighting"
 SECURITY_TOPIC = "home/security/status"
@@ -31,18 +31,17 @@ class SmartHomeSystem:
             # paho-mqtt版本1.6.0不需要这行配置，版本1.5.0及以下需要
             protocol = mqtt.MQTTv311  # 明确指定协议版本
         )
-        # 禁用SSL连接
-        # try:
-        #     self.client.tls_set(
-        #         ca_certs="mosquitto.org.crt",
-        #         cert_reqs=ssl.CERT_REQUIRED,
-        #         tls_version=ssl.PROTOCOL_TLSv1_2
-        #     )
-        #     # 可选：设置TLS不安全的警告（仅用于测试）
-        #     # self.client.tls_insecure_set(True)
-        # except Exception as e:
-        #     print(f"TLS配置错误: {e}")
-        #     raise
+        
+        try:
+            self.client.tls_set(
+                ca_certs="mosquitto.org.crt",
+                cert_reqs=ssl.CERT_REQUIRED,
+                tls_version=ssl.PROTOCOL_TLSv1_2
+            )
+            self.client.tls_insecure_set(True)
+        except Exception as e:
+            print(f"TLS配置错误: {e}")
+            raise
 
         # 设置回调
         self.client.on_connect = self.on_connect
