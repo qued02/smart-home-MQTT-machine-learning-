@@ -69,18 +69,21 @@ class SecurityPublisher:
 
     def _train_models(self):
         """训练门锁和噪音抑制的预测模型"""
+        try:
+            conn = sqlite3.connect('smart_home.db')
+            cursor = conn.cursor()
 
-        def prepare_data():
-            """准备训练数据"""
-            cursor.execute('''SELECT lock_status,
-                                     noise_reduction,
-                                     CAST(strftime('%H', timestamp) AS INTEGER) as hour,
-                              CAST(strftime('%w', timestamp) AS INTEGER) as weekday
-                              FROM security_status''')
+            # 修改查询语句，确保返回数值类型
+            cursor.execute('''SELECT 
+                                  lock_status, 
+                                  noise_reduction, 
+                                  CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                                  CAST(strftime('%w', timestamp) AS INTEGER) as weekday
+                                  FROM security_status''')
             records = cursor.fetchall()
 
             if not records:
-                # 生成模拟数据
+                # 生成模拟数据时也要确保数值类型
                 simulated_data = []
                 for _ in range(100):
                     hour = random.randint(0, 23)
@@ -94,57 +97,43 @@ class SecurityPublisher:
                     [(d[0], d[1], f"-{random.randint(1, 30)}") for d in simulated_data]
                 )
                 conn.commit()
-                return prepare_data()  # 递归调用获取新生成的数据
+                cursor.execute('''SELECT 
+                                      lock_status, 
+                                      noise_reduction, 
+                                      CAST(strftime('%H', timestamp) AS INTEGER) as hour,
+                                      CAST(strftime('%w', timestamp) AS INTEGER) as weekday
+                                      FROM security_status''')
+                records = cursor.fetchall()
 
             # 准备特征和标签
-            X = np.array([[row[2], row[3]] for row in records])
+            X = np.array([[row[2], row[3]] for row in records])  # hour和weekday已经是整数
             y_lock = np.array([1 if row[0] == "unlocked" else 0 for row in records])
             y_noise = np.array([1 if row[1] == "enabled" else 0 for row in records])
-            return X, y_lock, y_noise
 
-        def train_and_evaluate(model, X_train, y_train, X_test, y_test, target_names):
-            """训练和评估单个模型"""
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
-            acc = accuracy_score(y_test, y_pred)
-            report = classification_report(
-                y_test, y_pred,
-                target_names=target_names,
-                zero_division=0
-            )
-            return acc, report
-
-        conn = None
-        try:
-            conn = sqlite3.connect('smart_home.db')
-            cursor = conn.cursor()
-
-            # 获取数据
-            X, y_lock, y_noise = prepare_data()
-
-            # 分割数据集
+            # 使用不同的随机状态分割数据集
             X_train_lock, X_test_lock, y_train_lock, y_test_lock = train_test_split(
                 X, y_lock, test_size=0.2, random_state=42)
+
             X_train_noise, X_test_noise, y_train_noise, y_test_noise = train_test_split(
-                X, y_noise, test_size=0.2, random_state=24)
+                X, y_noise, test_size=0.2, random_state=24)  # 不同的随机种子
 
-            # 训练和评估模型
-            lock_acc, lock_report = train_and_evaluate(
-                self.lock_model, X_train_lock, y_train_lock, X_test_lock, y_test_lock,
-                ["locked", "unlocked"]
-            )
-            noise_acc, noise_report = train_and_evaluate(
-                self.noise_model, X_train_noise, y_train_noise, X_test_noise, y_test_noise,
-                ["disabled", "enabled"]
-            )
-
-            # 打印结果
+            # 训练和评估门锁模型
+            self.lock_model.fit(X_train_lock, y_train_lock)
+            lock_pred = self.lock_model.predict(X_test_lock)
+            lock_acc = accuracy_score(y_test_lock, lock_pred)
+            lock_report = classification_report(y_test_lock, lock_pred, target_names=["locked", "unlocked"])
             print(f"[Security] Lock model accuracy: {lock_acc:.2f}")
             print("Classification Report:\n", lock_report)
+
+            # 训练和评估噪音抑制模型
+            self.noise_model.fit(X_train_noise, y_train_noise)
+            noise_pred = self.noise_model.predict(X_test_noise)
+            noise_acc = accuracy_score(y_test_noise, noise_pred)
+            noise_report = classification_report(y_test_noise, noise_pred, target_names=["disabled", "enabled"])
             print(f"[Security] Noise model accuracy: {noise_acc:.2f}")
             print("Classification Report:\n", noise_report)
 
-            # 保存指标
+            # 保存模型性能指标供后续使用
             self.model_metrics = {
                 'lock': {'accuracy': lock_acc, 'report': lock_report},
                 'noise': {'accuracy': noise_acc, 'report': noise_report}
@@ -152,36 +141,36 @@ class SecurityPublisher:
 
         except Exception as e:
             print(f"[Security] Error in model training: {str(e)}")
+            # 可以考虑回退到简单规则
             self.fallback_to_rules = True
         finally:
             if conn:
                 conn.close()
-    def _predict_security_settings(self):
-        """使用机器学习模型预测安全设置"""
-        if not hasattr(self, 'lock_model') or not hasattr(self, 'noise_model'):
-            # Default behavior when models aren't trained
-            self.data["lock_status"] = "locked" if datetime.now().hour > 22 or datetime.now().hour < 6 else "unlocked"
-            self.data["noise_reduction"] = "enabled"
-            return
 
-        current_hour = datetime.now().hour
+def _predict_security_settings(self):
+    if not hasattr(self, 'lock_model') or not hasattr(self, 'noise_model'):
+        self.data["lock_status"] = "locked" if datetime.now().hour > 22 or datetime.now().hour < 6 else "unlocked"
+        self.data["noise_reduction"] = "enabled"
+        return
 
-        # 预测门锁状态
-        lock_prob = self.lock_model.predict_proba([[current_hour]])[0]
-        unlock_prob = lock_prob[1] if len(lock_prob) > 1 else 0.3  # 默认概率
+    now = datetime.now()
+    current_hour = now.hour
+    current_weekday = now.weekday()  # 0=Monday, ..., 6=Sunday
 
-        # 预测噪音抑制
-        noise_prob = self.noise_model.predict_proba([[current_hour]])[0]
-        enable_prob = noise_prob[1] if len(noise_prob) > 1 else 0.7  # 默认概率
+    lock_prob = self.lock_model.predict_proba([[current_hour, current_weekday]])[0]
+    unlock_prob = lock_prob[1] if len(lock_prob) > 1 else 0.3
 
-        # 根据概率随机生成状态（加入随机性模拟真实场景）
-        self.data["lock_status"] = "unlocked" if random.random() < unlock_prob else "locked"
-        self.data["noise_reduction"] = "enabled" if random.random() < enable_prob else "disabled"
-        self.data["time_of_day"] = self._get_time_of_day()
-        self.data["prediction_confidence"] = {
-            "lock": float(unlock_prob),
-            "noise": float(enable_prob)
-        }
+    noise_prob = self.noise_model.predict_proba([[current_hour, current_weekday]])[0]
+    enable_prob = noise_prob[1] if len(noise_prob) > 1 else 0.7
+
+    self.data["lock_status"] = "unlocked" if random.random() < unlock_prob else "locked"
+    self.data["noise_reduction"] = "enabled" if random.random() < enable_prob else "disabled"
+    self.data["time_of_day"] = self._get_time_of_day()
+    self.data["prediction_confidence"] = {
+        "lock": float(unlock_prob),
+        "noise": float(enable_prob)
+    }
+
 
     def publish(self):
         # 使用机器学习模型预测状态（替代完全随机）
