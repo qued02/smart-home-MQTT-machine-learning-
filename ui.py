@@ -27,16 +27,9 @@ class SmartHomeUI:
         self.root.title("MQTT智能家居控制系统")
         self.root.geometry("1200x800")
 
-        self.temp_data = [22.0]
-        self.light_data = [50]
-        self.security_data = ["locked"]
-        self.temp_timestamps = []
-        self.light_timestamps = []
-        self.security_timestamps = []
-
         # 使用与其他模块一致的MQTT配置
         self.broker = "test.mosquitto.org"
-        self.port = 8883
+        self.port = 1883  # 使用非SSL端口
         self.topics = {
             "temperature": "home/sensor/temperature",
             "lighting": "home/sensor/lighting",
@@ -52,6 +45,11 @@ class SmartHomeUI:
 
         # 消息队列用于线程安全更新UI
         self.message_queue = queue.Queue()
+        
+        # 由main.py设置的对象
+        self.mqtt_client = None
+        self.scheduler_pub = None
+        self.ui_queue = None
 
         # 初始化UI
         self.setup_ui()
@@ -86,19 +84,15 @@ class SmartHomeUI:
         self.control_frame = ttk.Labelframe(self.main_panel, text="设备控制", width=300)
         self.main_panel.add(self.control_frame)
 
-        # 右侧显示区域 - 先创建容器
+        # 右侧数据显示区域
         self.display_frame = ttk.Frame(self.main_panel)
         self.main_panel.add(self.display_frame)
 
-        # 创建专门放置图表的frame
-        self.chart_frame = ttk.Frame(self.display_frame)  # 添加这行
-        self.chart_frame.pack(fill=tk.BOTH, expand=True)  # 添加这行
-
-        # 然后初始化各组件
+        # 初始化各组件
         self.setup_temperature_controls()
         self.setup_lighting_controls()
         self.setup_security_controls()
-        self.setup_display_area()  # 这里会调用setup_realtime_charts()
+        self.setup_display_area()
         self.setup_notification_area()
 
     def setup_themes(self):
@@ -316,130 +310,47 @@ class SmartHomeUI:
         # 历史数据标签页
         self.history_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.history_tab, text="历史数据")
+        
+        # 定时任务标签页
+        self.schedule_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.schedule_tab, text="定时任务")
 
         # 初始化图表
         self.setup_realtime_charts()
         self.setup_history_charts()
+        self.setup_schedule_ui()
 
     def setup_realtime_charts(self):
-        """实时数据图表 - 动态版本"""
-        # 确保chart_frame存在
-        if not hasattr(self, 'chart_frame'):
-            self.chart_frame = ttk.Frame(self.display_frame)
-            self.chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # 清除可能存在的旧图表
-        for widget in self.chart_frame.winfo_children():
-            widget.destroy()
+        """实时数据图表"""
+        chart_frame = ttk.Frame(self.realtime_tab)
+        chart_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         # 温度图表
         self.temp_fig, self.temp_ax = plt.subplots(figsize=(5, 3))
         self.temp_line, = self.temp_ax.plot([], [], 'b-')
-        self.temp_ax.set_title("实时温度 (动态)")
+        self.temp_ax.set_title("实时温度")
         self.temp_ax.set_ylabel("温度 (°C)")
         self.temp_ax.set_ylim(15, 35)
-        self.temp_ax.set_xlim(0, 60)
         self.temp_ax.grid(True)
 
-        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=self.chart_frame)
+        self.temp_canvas = FigureCanvasTkAgg(self.temp_fig, master=chart_frame)
         self.temp_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
         # 照明图表
-        # 清空旧数据
-        if hasattr(self, 'light_data'):
-            self.light_data.clear()
-        else:
-            self.light_data = []
-
-        # 重新初始化图表
-        if hasattr(self, 'light_canvas'):
-            self.light_canvas.get_tk_widget().destroy()
-
         self.light_fig, self.light_ax = plt.subplots(figsize=(5, 3))
-        self.light_line, = self.light_ax.plot([], [], 'g-')
-        self.light_ax.set_title("照明亮度 (动态)")
+        self.light_bar = self.light_ax.bar([0], [80], width=0.6)
+        self.light_ax.set_title("照明亮度")
         self.light_ax.set_ylabel("亮度 (%)")
         self.light_ax.set_ylim(0, 100)
-        self.light_ax.set_xlim(0, 60)
         self.light_ax.grid(True)
 
-        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=self.chart_frame)
+        self.light_canvas = FigureCanvasTkAgg(self.light_fig, master=chart_frame)
         self.light_canvas.get_tk_widget().grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
-        print("[DEBUG] 照明图表已重新初始化")  # 调试输出
-
-        # 安全状态图表
-        self.security_fig, self.security_ax = plt.subplots(figsize=(5, 3))
-        self.security_line, = self.security_ax.plot([], [], 'r-', marker='o')  # 改为折线图
-        self.security_ax.set_title("安全状态 (动态)")
-        self.security_ax.set_yticks([0, 1])
-        self.security_ax.set_yticklabels(["锁定", "解锁"])
-        self.security_ax.set_ylim(-0.5, 1.5)
-        self.security_ax.set_xlim(0, 60)
-        self.security_ax.grid(True)
-
-        self.security_canvas = FigureCanvasTkAgg(self.security_fig, master=self.chart_frame)
-        self.security_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-
         # 配置行列权重
-        self.chart_frame.grid_rowconfigure(0, weight=1)
-        self.chart_frame.grid_rowconfigure(1, weight=1)
-        self.chart_frame.grid_columnconfigure(0, weight=1)
-        self.chart_frame.grid_columnconfigure(1, weight=1)
-
-        # 启动动态更新
-        self.start_dynamic_updates()
-
-    def start_dynamic_updates(self):
-        """启动动态图表更新"""
-
-        def update_charts():
-            try:
-                # 更新温度图表
-                if len(self.temp_data) > 0:
-                    self.temp_line.set_data(range(len(self.temp_data)), self.temp_data)
-                    self.temp_ax.relim()
-                    self.temp_ax.autoscale_view(scalex=False, scaley=True)
-                    self.temp_canvas.draw()
-
-                # 更新照明图表
-                if hasattr(self, 'light_data') and self.light_data:
-                    x_data = range(len(self.light_data))
-                    self.light_line.set_data(x_data, self.light_data)
-
-                    # 调整坐标轴范围
-                    self.light_ax.set_xlim(0, max(60, len(self.light_data) + 5))
-                    self.light_ax.relim()
-                    self.light_ax.autoscale_view(scalex=False, scaley=True)
-
-                    # 强制重绘
-                    self.light_canvas.draw()
-                    print("[DEBUG] 照明图表已更新")  # 调试输出
-
-                # 更新安全图表
-                if hasattr(self, 'security_data') and len(self.security_data) > 0:
-                    self.security_ax.clear()
-                    markerline, stemlines, baseline = self.security_ax.stem(
-                        range(len(self.security_data)),
-                        [1 if s == "unlocked" else 0 for s in self.security_data],
-                        linefmt='C3-',
-                        markerfmt='C3o',
-                        basefmt='C0-'
-                    )
-                    self.security_ax.set_title("安全状态 (动态)")
-                    self.security_ax.set_yticks([0, 1])
-                    self.security_ax.set_yticklabels(["锁定", "解锁"])
-                    self.security_ax.set_ylim(-0.5, 1.5)
-                    self.security_ax.set_xlim(0, 60)
-                    self.security_ax.grid(True)
-                    self.security_canvas.draw()
-
-            except Exception as e:
-                print(f"更新图表时出错: {e}")
-            finally:
-                self.root.after(500, update_charts)
-
-        update_charts()
+        chart_frame.grid_rowconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(1, weight=1)
 
     def setup_history_charts(self):
         """历史数据图表"""
@@ -583,24 +494,39 @@ class SmartHomeUI:
         self.message_queue.put((msg_type, data))
 
     def process_queue(self):
-        """处理消息队列中的消息"""
+        """处理消息队列"""
         try:
-            while True:
+            # 处理UI队列中的消息
+            if hasattr(self, 'ui_queue') and self.ui_queue:
+                while not self.ui_queue.empty():
+                    msg_type, data = self.ui_queue.get_nowait()
+                    
+                    if msg_type == "update_temperature":
+                        self.update_temperature_data(data)
+                    elif msg_type == "update_lighting":
+                        self.update_lighting_data(data)
+                    elif msg_type == "update_security":
+                        self.update_security_data(data)
+                    elif msg_type == "update_schedule":
+                        self.handle_schedule_update(data)
+            
+            # 处理内部消息队列
+            while not self.message_queue.empty():
                 msg_type, data = self.message_queue.get_nowait()
-
-                if msg_type == "update_status":
-                    self.update_connection_status(data["connected"])
-                elif msg_type == "update_temperature":
+                
+                if msg_type == "update_temperature":
                     self.update_temperature_data(data)
                 elif msg_type == "update_lighting":
                     self.update_lighting_data(data)
                 elif msg_type == "update_security":
                     self.update_security_data(data)
-
-        except queue.Empty:
-            pass
-
-        self.root.after(100, self.process_queue)
+                elif msg_type == "connection_status":
+                    self.update_connection_status(data)
+        except Exception as e:
+            print(f"处理消息队列错误: {e}")
+        finally:
+            # 继续检查队列
+            self.root.after(100, self.process_queue)
 
     def update_connection_status(self, connected):
         """更新连接状态"""
@@ -619,70 +545,45 @@ class SmartHomeUI:
         self.current_data["temperature"] = temp_data
         self.temp_var.set(f"{temp_data['temperature']:.1f} °C")
 
-        # 添加到动态图表数据
-        self.temp_data.append(temp_data['temperature'])
-        if len(self.temp_data) > 60:
-            self.temp_data.pop(0)
+        # 更新温度图表（保持不变）
+        temp = temp_data["temperature"]
+        self.temp_line.set_data([0, 1], [temp, temp])
+        self.temp_ax.relim()
+        self.temp_ax.autoscale_view()
+        self.temp_canvas.draw()
 
         # 检查温度警告
         if "comfort_level" in temp_data and temp_data["comfort_level"] == "high":
-            self.add_notification(f"高温警告: {temp_data['temperature']}°C", "warning")
+            self.add_notification(f"高温警告: {temp}°C", "warning")
 
         self.update_last_update_time()
 
     def update_lighting_data(self, data):
-        """增强兼容性的照明数据更新"""
-        print(f"[DEBUG] 收到照明数据: {data}")  # 调试输出
+        """更新照明数据"""
+        self.current_data["lighting"] = data
+        self.brightness_slider.set(data["brightness"])
+        self.camera_mode.set(data["camera_mode"])
 
-        try:
-            if isinstance(data, (int, float)):
-                data = {"brightness": int(data), "camera_mode": "auto"}
+        # 更新照明图表
+        for rect in self.light_bar:
+            rect.set_height(data["brightness"])
+        self.light_ax.relim()
+        self.light_ax.autoscale_view()
+        self.light_canvas.draw()
 
-            # 确保数据列表存在
-            if not hasattr(self, 'light_data'):
-                self.light_data = []
-                print("[DEBUG] 初始化light_data列表")
-
-            # 添加新数据点
-            brightness = data.get("brightness", 0)
-            self.light_data.append(brightness)
-
-            # 限制数据点数量
-            if len(self.light_data) > 60:
-                self.light_data.pop(0)
-
-            print(f"[DEBUG] 当前照明数据点: {len(self.light_data)}")  # 调试输出
-
-            # 更新UI控件
-            self.brightness_slider.set(brightness)
-            self.camera_mode.set(data.get("camera_mode", "auto"))
-
-        except Exception as e:
-            print(f"[DEBUG] 更新照明数据时出错: {e}")
+        self.update_last_update_time()
 
     def update_security_data(self, data):
-        """增强兼容性的安全数据更新"""
-        try:
-            if isinstance(data, bool):
-                data = {"lock_status": "unlocked" if data else "locked",
-                        "noise_reduction": "enabled"}
+        """更新安全数据"""
+        self.current_data["security"] = data
+        self.lock_var.set(data["lock_status"])
+        self.noise_var.set(data["noise_reduction"])
 
-            print(f"更新安全数据: {data}")  # 调试打印
+        # 检查门锁状态变化
+        if data["lock_status"] == "unlocked":
+            self.add_notification("门锁已解锁", "alert")
 
-            self.current_data["security"] = data
-            self.lock_var.set(data.get("lock_status", "locked"))
-            self.noise_var.set(data.get("noise_reduction", "enabled"))
-
-            # 确保数据列表已初始化
-            if not hasattr(self, 'security_data'):
-                self.security_data = []
-
-            self.security_data.append(data.get("lock_status", "locked"))
-            if len(self.security_data) > 60:
-                self.security_data.pop(0)
-
-        except Exception as e:
-            print(f"更新安全数据时出错: {e}")
+        self.update_last_update_time()
 
     def update_last_update_time(self):
         """更新最后更新时间"""
@@ -817,47 +718,35 @@ class SmartHomeUI:
 
     def plot_security_history(self, data):
         """绘制安全历史图表"""
-        self.history_ax.clear()
-
         if not data:  # 检查数据是否为空
+            self.history_ax.clear()
             self.history_ax.text(0.5, 0.5, '无安全数据', ha='center')
             self.history_canvas.draw()
             return
 
-        try:
-            timestamps = [row[1] for row in data]
-            lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
+        timestamps = [row[1] for row in data]
+        lock_status = [1 if row[0] == "unlocked" else 0 for row in data]
 
-            # 修改后的stem调用方式（移除use_line_collection参数）
-            markerline, stemlines, baseline = self.history_ax.stem(
-                range(len(timestamps)),
-                lock_status,
-                linefmt='C3-',  # 线条颜色
-                markerfmt='C3o',  # 标记样式
-                basefmt='C0-'  # 基线样式
-            )
+        self.history_ax.clear()  # 先清空图表
 
-            # 设置x轴标签为时间
-            self.history_ax.set_xticks(range(len(timestamps)))
-            self.history_ax.set_xticklabels(timestamps)
+        # 使用更兼容的绘图方式
+        markerline, stemlines, baseline = self.history_ax.stem(
+            range(len(timestamps)), lock_status, use_line_collection=True)
 
-            self.history_ax.set_title("门锁状态历史")
-            self.history_ax.set_yticks([0, 1])
-            self.history_ax.set_yticklabels(["锁定", "解锁"])
-            self.history_ax.grid(True)
+        # 设置x轴标签为时间
+        self.history_ax.set_xticks(range(len(timestamps)))
+        self.history_ax.set_xticklabels(timestamps)
 
-            # 旋转x轴标签
-            for label in self.history_ax.get_xticklabels():
-                label.set_rotation(45)
+        self.history_ax.set_title("门锁状态历史")
+        self.history_ax.set_yticks([0, 1])
+        self.history_ax.set_yticklabels(["锁定", "解锁"])
+        self.history_ax.grid(True)
 
-            self.history_ax.figure.tight_layout()
-            self.history_canvas.draw()
+        # 旋转x轴标签
+        for label in self.history_ax.get_xticklabels():
+            label.set_rotation(45)
 
-        except Exception as e:
-            print(f"绘制安全历史图表错误: {e}")
-            self.history_ax.clear()
-            self.history_ax.text(0.5, 0.5, f'错误: {str(e)}', ha='center')
-            self.history_canvas.draw()
+        self.history_ax.figure.tight_layout()
 
     def add_notification(self, message, level="info"):
         """添加系统通知"""
@@ -924,6 +813,494 @@ class SmartHomeUI:
     def shutdown(self):
         plt.close('all')
         self.root.quit()
+
+    def setup_schedule_ui(self):
+        """设置定时任务管理界面"""
+        if not hasattr(self, 'schedule_tab'):
+            return
+            
+        # 分割定时任务界面为左右两部分
+        self.schedule_paned = ttk.PanedWindow(self.schedule_tab, orient=tk.HORIZONTAL)
+        self.schedule_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # 左侧：定时任务列表
+        self.schedule_list_frame = ttk.LabelFrame(self.schedule_paned, text="定时任务列表")
+        self.schedule_paned.add(self.schedule_list_frame, weight=1)
+        
+        # 右侧：添加/编辑定时任务
+        self.schedule_edit_frame = ttk.LabelFrame(self.schedule_paned, text="添加/编辑定时任务")
+        self.schedule_paned.add(self.schedule_edit_frame, weight=1)
+        
+        # 设置定时任务列表
+        self.setup_schedule_list()
+        
+        # 设置定时任务编辑区域
+        self.setup_schedule_editor()
+    
+    def setup_schedule_list(self):
+        """设置定时任务列表"""
+        # 创建工具栏
+        toolbar = ttk.Frame(self.schedule_list_frame)
+        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # 添加按钮
+        self.add_schedule_btn = ttk.Button(
+            toolbar, text="添加任务", command=self.new_schedule)
+        self.add_schedule_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.refresh_schedule_btn = ttk.Button(
+            toolbar, text="刷新", command=self.refresh_schedules)
+        self.refresh_schedule_btn.pack(side=tk.LEFT, padx=2)
+        
+        # 创建列表
+        columns = ("名称", "设备类型", "执行时间", "重复", "状态")
+        self.schedule_tree = ttk.Treeview(
+            self.schedule_list_frame, columns=columns, show="headings")
+        
+        # 设置列标题
+        for col in columns:
+            self.schedule_tree.heading(col, text=col)
+            self.schedule_tree.column(col, width=100)
+        
+        # 添加滚动条
+        scrollbar = ttk.Scrollbar(
+            self.schedule_list_frame, orient=tk.VERTICAL, command=self.schedule_tree.yview)
+        self.schedule_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # 布局
+        self.schedule_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+        
+        # 绑定双击事件
+        self.schedule_tree.bind("<Double-1>", self.edit_selected_schedule)
+        
+        # 右键菜单
+        self.schedule_menu = tk.Menu(self.schedule_tree, tearoff=0)
+        self.schedule_menu.add_command(label="编辑", command=self.edit_selected_schedule)
+        self.schedule_menu.add_command(label="删除", command=self.delete_selected_schedule)
+        self.schedule_menu.add_separator()
+        self.schedule_menu.add_command(label="启用/禁用", command=self.toggle_schedule_status)
+        
+        self.schedule_tree.bind("<Button-3>", self.show_schedule_menu)
+        
+        # 初始加载定时任务
+        self.refresh_schedules()
+    
+    def setup_schedule_editor(self):
+        """设置定时任务编辑区域"""
+        # 创建表单
+        form_frame = ttk.Frame(self.schedule_edit_frame)
+        form_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # 名称
+        ttk.Label(form_frame, text="任务名称:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.schedule_name_var = tk.StringVar()
+        ttk.Entry(form_frame, textvariable=self.schedule_name_var).grid(
+            row=0, column=1, sticky=tk.EW, pady=5)
+        
+        # 设备类型
+        ttk.Label(form_frame, text="设备类型:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.device_type_var = tk.StringVar()
+        device_types = ["temperature", "lighting", "security"]
+        ttk.Combobox(form_frame, textvariable=self.device_type_var, 
+                    values=device_types, state="readonly").grid(
+            row=1, column=1, sticky=tk.EW, pady=5)
+        
+        # 执行时间
+        ttk.Label(form_frame, text="执行时间:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        time_frame = ttk.Frame(form_frame)
+        time_frame.grid(row=2, column=1, sticky=tk.EW, pady=5)
+        
+        self.hour_var = tk.StringVar()
+        self.minute_var = tk.StringVar()
+        
+        # 小时选择器
+        hours = [f"{h:02d}" for h in range(24)]
+        ttk.Combobox(time_frame, textvariable=self.hour_var, values=hours, 
+                    width=5, state="readonly").pack(side=tk.LEFT)
+        ttk.Label(time_frame, text=":").pack(side=tk.LEFT)
+        
+        # 分钟选择器
+        minutes = [f"{m:02d}" for m in range(60)]
+        ttk.Combobox(time_frame, textvariable=self.minute_var, values=minutes, 
+                    width=5, state="readonly").pack(side=tk.LEFT)
+        
+        # 重复执行
+        ttk.Label(form_frame, text="重复执行:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        repeat_frame = ttk.Frame(form_frame)
+        repeat_frame.grid(row=3, column=1, sticky=tk.EW, pady=5)
+        
+        self.repeat_vars = []
+        days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        
+        for i, day in enumerate(days):
+            var = tk.BooleanVar()
+            self.repeat_vars.append(var)
+            ttk.Checkbutton(repeat_frame, text=day, variable=var).grid(
+                row=0, column=i, padx=2)
+        
+        # 参数设置
+        ttk.Label(form_frame, text="参数设置:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        
+        # 创建参数框架
+        self.params_frame = ttk.Frame(form_frame)
+        self.params_frame.grid(row=4, column=1, sticky=tk.EW, pady=5)
+        
+        # 设置参数UI的初始状态
+        self.setup_empty_params_ui()
+        
+        # 绑定设备类型变更事件
+        self.device_type_var.trace("w", self.on_device_type_change)
+        
+        # 按钮区域
+        button_frame = ttk.Frame(form_frame)
+        button_frame.grid(row=5, column=0, columnspan=2, pady=10)
+        
+        self.save_btn = ttk.Button(button_frame, text="保存", command=self.save_schedule)
+        self.save_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.cancel_btn = ttk.Button(button_frame, text="取消", command=self.clear_schedule_form)
+        self.cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+        # 当前编辑的定时任务ID
+        self.current_schedule_id = None
+        
+        # 设置网格布局的列权重
+        form_frame.columnconfigure(1, weight=1)
+    
+    def setup_empty_params_ui(self):
+        """设置空参数UI"""
+        # 清空参数框架
+        for widget in self.params_frame.winfo_children():
+            widget.destroy()
+            
+        ttk.Label(self.params_frame, text="请先选择设备类型").pack()
+    
+    def setup_temperature_params_ui(self):
+        """设置温度参数UI"""
+        # 清空参数框架
+        for widget in self.params_frame.winfo_children():
+            widget.destroy()
+            
+        # 温度参数
+        ttk.Label(self.params_frame, text="温度值:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.temp_value_var = tk.DoubleVar(value=22.0)
+        ttk.Spinbox(self.params_frame, from_=10, to=35, increment=0.5, 
+                   textvariable=self.temp_value_var, width=10).grid(
+            row=0, column=1, sticky=tk.W, pady=5)
+        
+        ttk.Label(self.params_frame, text="舒适度:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.comfort_level_var = tk.StringVar(value="optimal")
+        comfort_levels = ["optimal", "warm", "cold"]
+        ttk.Combobox(self.params_frame, textvariable=self.comfort_level_var, 
+                    values=comfort_levels, state="readonly", width=10).grid(
+            row=1, column=1, sticky=tk.W, pady=5)
+    
+    def setup_lighting_params_ui(self):
+        """设置照明参数UI"""
+        # 清空参数框架
+        for widget in self.params_frame.winfo_children():
+            widget.destroy()
+            
+        # 亮度参数
+        ttk.Label(self.params_frame, text="亮度:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.brightness_var = tk.IntVar(value=80)
+        ttk.Scale(self.params_frame, from_=0, to=100, orient=tk.HORIZONTAL,
+                 variable=self.brightness_var).grid(
+            row=0, column=1, sticky=tk.EW, pady=5)
+        
+        ttk.Label(self.params_frame, text="相机模式:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.camera_mode_var = tk.StringVar(value="auto")
+        camera_modes = ["auto", "manual", "night"]
+        ttk.Combobox(self.params_frame, textvariable=self.camera_mode_var, 
+                    values=camera_modes, state="readonly").grid(
+            row=1, column=1, sticky=tk.W, pady=5)
+    
+    def setup_security_params_ui(self):
+        """设置安全参数UI"""
+        # 清空参数框架
+        for widget in self.params_frame.winfo_children():
+            widget.destroy()
+            
+        # 锁状态参数
+        ttk.Label(self.params_frame, text="锁状态:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        self.lock_status_var = tk.StringVar(value="locked")
+        lock_statuses = ["locked", "unlocked"]
+        ttk.Combobox(self.params_frame, textvariable=self.lock_status_var, 
+                    values=lock_statuses, state="readonly").grid(
+            row=0, column=1, sticky=tk.W, pady=5)
+        
+        ttk.Label(self.params_frame, text="降噪:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        self.noise_reduction_var = tk.StringVar(value="enabled")
+        noise_reductions = ["enabled", "disabled"]
+        ttk.Combobox(self.params_frame, textvariable=self.noise_reduction_var, 
+                    values=noise_reductions, state="readonly").grid(
+            row=1, column=1, sticky=tk.W, pady=5)
+    
+    def on_device_type_change(self, *args):
+        """处理设备类型变更"""
+        device_type = self.device_type_var.get()
+        
+        if device_type == "temperature":
+            self.setup_temperature_params_ui()
+        elif device_type == "lighting":
+            self.setup_lighting_params_ui()
+        elif device_type == "security":
+            self.setup_security_params_ui()
+        else:
+            self.setup_empty_params_ui()
+    
+    def refresh_schedules(self):
+        """刷新定时任务列表"""
+        # 清空列表
+        for item in self.schedule_tree.get_children():
+            self.schedule_tree.delete(item)
+            
+        if not self.scheduler_pub:
+            return
+            
+        # 获取所有定时任务
+        schedules = self.scheduler_pub.get_all_schedules()
+        
+        # 添加到列表
+        for schedule_id, schedule in schedules.items():
+            # 格式化重复天数
+            repeat_days = schedule.get('repeat_days', [])
+            if not repeat_days:
+                repeat_text = "不重复"
+            else:
+                days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                repeat_text = ", ".join([days[day] for day in repeat_days])
+                
+            # 状态
+            status = "启用" if schedule.get('enabled', True) else "禁用"
+            
+            # 添加到树形列表
+            self.schedule_tree.insert("", "end", iid=schedule_id, values=(
+                schedule['name'],
+                schedule['device_type'],
+                schedule['schedule_time'],
+                repeat_text,
+                status
+            ))
+    
+    def new_schedule(self):
+        """创建新的定时任务"""
+        self.current_schedule_id = None
+        self.clear_schedule_form()
+        
+        # 设置默认值
+        self.hour_var.set("08")
+        self.minute_var.set("00")
+        
+        # 显示定时任务标签页
+        self.notebook.select(self.schedule_tab)
+    
+    def edit_selected_schedule(self, event=None):
+        """编辑选中的定时任务"""
+        selected = self.schedule_tree.selection()
+        if not selected:
+            return
+            
+        schedule_id = int(selected[0])
+        schedule = self.scheduler_pub.get_schedule(schedule_id)
+        
+        if not schedule:
+            return
+            
+        # 设置表单值
+        self.current_schedule_id = schedule_id
+        self.schedule_name_var.set(schedule['name'])
+        self.device_type_var.set(schedule['device_type'])
+        
+        # 设置时间
+        time_parts = schedule['schedule_time'].split(":")
+        self.hour_var.set(time_parts[0])
+        self.minute_var.set(time_parts[1])
+        
+        # 设置重复天数
+        for i in range(7):
+            self.repeat_vars[i].set(i in schedule.get('repeat_days', []))
+            
+        # 设置参数
+        self.on_device_type_change()  # 触发参数UI更新
+        
+        # 根据设备类型设置参数值
+        device_type = schedule['device_type']
+        params = schedule['parameters']
+        
+        if device_type == "temperature":
+            self.temp_value_var.set(params.get('temperature', 22.0))
+            self.comfort_level_var.set(params.get('comfort_level', 'optimal'))
+        elif device_type == "lighting":
+            self.brightness_var.set(params.get('brightness', 80))
+            self.camera_mode_var.set(params.get('camera_mode', 'auto'))
+        elif device_type == "security":
+            self.lock_status_var.set(params.get('lock_status', 'locked'))
+            self.noise_reduction_var.set(params.get('noise_reduction', 'enabled'))
+        
+        # 显示定时任务标签页
+        self.notebook.select(self.schedule_tab)
+    
+    def save_schedule(self):
+        """保存定时任务"""
+        # 获取表单数据
+        name = self.schedule_name_var.get()
+        device_type = self.device_type_var.get()
+        
+        # 验证必填字段
+        if not name or not device_type:
+            messagebox.showerror("错误", "请填写任务名称和选择设备类型")
+            return
+            
+        # 构建执行时间
+        hour = self.hour_var.get()
+        minute = self.minute_var.get()
+        
+        if not hour or not minute:
+            messagebox.showerror("错误", "请设置执行时间")
+            return
+            
+        schedule_time = f"{hour}:{minute}"
+        
+        # 获取重复天数
+        repeat_days = []
+        for i, var in enumerate(self.repeat_vars):
+            if var.get():
+                repeat_days.append(i)
+                
+        # 获取参数
+        parameters = self.get_schedule_parameters()
+        
+        if not self.scheduler_pub:
+            messagebox.showerror("错误", "调度器未初始化")
+            return
+            
+        try:
+            if self.current_schedule_id is None:
+                # 添加新任务
+                self.scheduler_pub.add_schedule(
+                    name, device_type, "set", parameters, schedule_time, repeat_days)
+                messagebox.showinfo("成功", "定时任务已添加")
+            else:
+                # 更新现有任务
+                self.scheduler_pub.update_schedule(
+                    self.current_schedule_id,
+                    name=name,
+                    device_type=device_type,
+                    action="set",
+                    parameters=parameters,
+                    schedule_time=schedule_time,
+                    repeat_days=repeat_days
+                )
+                messagebox.showinfo("成功", "定时任务已更新")
+                
+            # 刷新列表
+            self.refresh_schedules()
+            
+            # 清空表单
+            self.clear_schedule_form()
+            
+        except Exception as e:
+            messagebox.showerror("错误", f"保存定时任务失败: {e}")
+    
+    def get_schedule_parameters(self):
+        """根据设备类型获取参数"""
+        device_type = self.device_type_var.get()
+        
+        if device_type == "temperature":
+            return {
+                "temperature": self.temp_value_var.get(),
+                "comfort_level": self.comfort_level_var.get()
+            }
+        elif device_type == "lighting":
+            return {
+                "brightness": self.brightness_var.get(),
+                "camera_mode": self.camera_mode_var.get()
+            }
+        elif device_type == "security":
+            return {
+                "lock_status": self.lock_status_var.get(),
+                "noise_reduction": self.noise_reduction_var.get()
+            }
+        else:
+            return {}
+    
+    def clear_schedule_form(self):
+        """清空定时任务表单"""
+        self.current_schedule_id = None
+        self.schedule_name_var.set("")
+        self.device_type_var.set("")
+        self.hour_var.set("")
+        self.minute_var.set("")
+        
+        for var in self.repeat_vars:
+            var.set(False)
+            
+        self.setup_empty_params_ui()
+    
+    def delete_selected_schedule(self):
+        """删除选中的定时任务"""
+        selected = self.schedule_tree.selection()
+        if not selected:
+            return
+            
+        schedule_id = int(selected[0])
+        
+        if messagebox.askyesno("确认", "确定要删除选中的定时任务吗？"):
+            if self.scheduler_pub.delete_schedule(schedule_id):
+                self.refresh_schedules()
+                
+                # 如果正在编辑该任务，清空表单
+                if self.current_schedule_id == schedule_id:
+                    self.clear_schedule_form()
+    
+    def toggle_schedule_status(self):
+        """切换定时任务状态（启用/禁用）"""
+        selected = self.schedule_tree.selection()
+        if not selected:
+            return
+            
+        schedule_id = int(selected[0])
+        schedule = self.scheduler_pub.get_schedule(schedule_id)
+        
+        if not schedule:
+            return
+            
+        # 切换状态
+        enabled = not schedule.get('enabled', True)
+        
+        if self.scheduler_pub.enable_schedule(schedule_id, enabled):
+            self.refresh_schedules()
+    
+    def show_schedule_menu(self, event):
+        """显示定时任务右键菜单"""
+        item = self.schedule_tree.identify_row(event.y)
+        if item:
+            self.schedule_tree.selection_set(item)
+            self.schedule_menu.post(event.x_root, event.y_root)
+    
+    def handle_schedule_update(self, data):
+        """处理定时任务更新消息"""
+        action = data.get('action')
+        
+        if action in ['add', 'update', 'delete']:
+            self.refresh_schedules()
+            
+            # 如果正在编辑的任务被删除，清空表单
+            if action == 'delete' and self.current_schedule_id == data.get('id'):
+                self.clear_schedule_form()
+                
+            # 添加通知
+            schedule_data = data.get('data', {})
+            name = schedule_data.get('name', '未知任务')
+            
+            if action == 'add':
+                self.add_notification(f"新增定时任务: {name}", "info")
+            elif action == 'update':
+                self.add_notification(f"更新定时任务: {name}", "info")
+            elif action == 'delete':
+                self.add_notification(f"删除定时任务: {name}", "warning")
 
 
 if __name__ == "__main__":
