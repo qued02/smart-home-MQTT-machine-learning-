@@ -3,12 +3,13 @@ import json
 import random
 import numpy as np
 import time
+import os
+import requests
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from datetime import datetime
-from sklearn.preprocessing import StandardScaler
-
+from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 
 class LightingPublisher:
     def __init__(self, client):
@@ -18,44 +19,63 @@ class LightingPublisher:
             "brightness": 80,
             "camera_mode": "auto"
         }
-        self.previous_brightness = 80  # 添加前一个亮度值
-        self.smoothing_factor = 0.3  # 平滑系数(0-1之间)
 
-        # 新增的机器学习模型部分
+        self.poly = PolynomialFeatures(degree=2)
+        self.scaler = StandardScaler()
         self.model = LinearRegression()
-        self.history_data = [
-            [20, 100], [30, 95], [40, 90], [50, 85],
-            [60, 80], [70, 75], [80, 70], [90, 65]
-        ]
         self.train_model()
-        self.room_type = "living_room"  # 可配置为 bedroom/kitchen等
+
+        self.room_type = "living_room"
         self.occupancy = False
         self.last_motion_time = time.time()
-        self.scaler = StandardScaler()
+
+        self.api_key = os.getenv("OWM_API_KEY", "your_api_key_here")
+        self.city = "Shanghai"
+        self.weather_condition = "clear"
+
+    def _update_weather(self):
+        try:
+            url = f"http://api.openweathermap.org/data/2.5/weather?q={self.city}&appid={self.api_key}"
+            response = requests.get(url, timeout=3)
+            weather_data = response.json()
+            if "weather" in weather_data:
+                self.weather_condition = weather_data["weather"][0]["main"].lower()
+        except Exception as e:
+            print(f"[Weather API] Error: {e}")
 
     def _simulate_real_lighting(self):
         now = datetime.now()
         hour = now.hour + now.minute / 60
+        self._update_weather()
 
-        # 基础光照 (考虑昼夜变化)
-        if 6 <= hour < 18:  # 白天
+        if 6 <= hour < 18:
             base_light = 80 + 40 * np.sin(np.pi * (hour - 12) / 12)
-        else:  # 夜晚
+        else:
             base_light = 10 + 5 * np.sin(np.pi * (hour - 24) / 12)
 
-        # 随机波动
-        random_effect = np.random.randint(-5, 5)
+        weather_effects = {
+            'clear': +10,
+            'clouds': -5,
+            'rain': -15,
+            'thunderstorm': -20,
+            'snow': -10
+        }
+        weather_effect = weather_effects.get(self.weather_condition, 0)
 
-        # 人体活动影响 (30%概率检测到活动)
+        behavior_effect = 0
+        if 6 <= hour <= 8:
+            behavior_effect += 20
+        if 20 <= hour <= 23 and not self.occupancy:
+            behavior_effect -= 15
+
         motion_effect = 0
         if np.random.random() < 0.3:
             self.occupancy = True
             self.last_motion_time = time.time()
             motion_effect = 30 + np.random.randint(0, 20)
-        elif time.time() - self.last_motion_time > 300:  # 5分钟无活动
+        elif time.time() - self.last_motion_time > 300:
             self.occupancy = False
 
-        # 房间类型调整
         room_adjustments = {
             'living_room': 5,
             'bedroom': -10,
@@ -63,71 +83,42 @@ class LightingPublisher:
             'bathroom': 0
         }
 
-        raw_brightness = base_light + random_effect + motion_effect + room_adjustments[self.room_type]
-
-        # 应用平滑处理
-        smoothed_brightness = (self.smoothing_factor * raw_brightness +
-                               (1 - self.smoothing_factor) * self.previous_brightness)
-        max_change = 5
-        if abs(raw_brightness - self.previous_brightness) > max_change:
-            if raw_brightness > self.previous_brightness:
-                smoothed_brightness = self.previous_brightness + max_change
-            else:
-                smoothed_brightness = self.previous_brightness - max_change
-        else:
-            smoothed_brightness = raw_brightness
-
-        # 更新前一个亮度值
-        self.previous_brightness = smoothed_brightness
-
-        return np.clip(smoothed_brightness, 0, 100)
+        random_effect = np.random.randint(-5, 5)
+        brightness = base_light + random_effect + motion_effect + behavior_effect + weather_effect
+        brightness += room_adjustments.get(self.room_type, 0)
+        # 返回小时数和模拟的亮度值（可选）
+        return hour, np.clip(brightness, 0, 100)
 
     def train_model(self):
-        hours = np.random.randint(0, 24, 1000)
-        brightness = np.clip(80 + 30 * np.sin(np.pi * (hours - 12) / 12) + np.random.normal(0, 5, 1000), 0, 100)
-        self.history_data = np.column_stack((hours, brightness))
+        hours = np.random.randint(0, 24, 1000).reshape(-1, 1)
+        brightness = np.clip(80 + 30 * np.sin(np.pi * (hours.flatten() - 12) / 12) + np.random.normal(0, 5, 1000), 0, 100)
+        
+        X_poly = self.poly.fit_transform(hours)
+        X_scaled = self.scaler.fit_transform(X_poly)
 
-        X = self.history_data[:, 0].reshape(-1, 1)
-        y = self.history_data[:, 1]
-
-        # 添加多项式特征
-        from sklearn.preprocessing import PolynomialFeatures
-        poly = PolynomialFeatures(degree=2)
-        X_poly = poly.fit_transform(X)
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_poly, y, test_size=0.2, random_state=42)
-
-        self.model = LinearRegression()
+        X_train, X_test, y_train, y_test = train_test_split(X_scaled, brightness, test_size=0.2, random_state=42)
         self.model.fit(X_train, y_train)
-
         y_pred = self.model.predict(X_test)
-        mse = mean_squared_error(y_test, y_pred)
-        print(f"Lighting model MSE: {mse:.2f}")
+        print(f"[Model] Lighting MSE: {mean_squared_error(y_test, y_pred):.2f}")
 
-    def predict_brightness_adjustment(self, ambient_light):
-        if hasattr(self, 'scaler'):
-            ambient_light_scaled = self.scaler.transform([[ambient_light]])
-            return int(self.model.predict(ambient_light_scaled)[0])
-        return int(self.model.predict([[ambient_light]])[0])
+    def predict_brightness_adjustment(self, hour):
+        X = np.array([[hour]])
+        X_poly = self.poly.transform(X)
+        X_scaled = self.scaler.transform(X_poly)
+        pred = self.model.predict(X_scaled)[0]
+        return int(np.clip(pred, 0, 100))
 
     def publish(self):
-        ambient_light = np.random.randint(10, 100)
-        self.data["brightness"] = self.predict_brightness_adjustment(ambient_light)
+        current_hour, simulated_brightness = self._simulate_real_lighting()
+        # 这里用小时数预测亮度调整
+        self.data["brightness"] = self.predict_brightness_adjustment(current_hour)
         self.data["camera_mode"] = random.choice(["auto", "manual", "off"])
-
         try:
-            # QoS 1 - 控制指令需要确认
-            self.client.publish(
-                self.topic,
-                json.dumps(self.data),
-                qos=1
-            )
-            print(f"[Lighting] Published (QoS 1): {self.data}")
+            self.client.publish(self.topic, json.dumps(self.data), qos=1)
+            print(f"[Lighting] Published(QoS 1): {self.data}")
         except Exception as e:
             print(f"[Lighting] Publish error: {e}")
 
-# 保持LightingSubscriber类完全不变
 class LightingSubscriber:
     def __init__(self, client):
         self.client = client
@@ -138,5 +129,5 @@ class LightingSubscriber:
         try:
             data = json.loads(msg.payload.decode('utf-8'))
             print(f"[Lighting] Received: {data}")
-        except json.JSONDecodeError:
-            print(f"[Lighting] Invalid data received")
+        except Exception as e:
+            print(f"[Lighting] Error: {e}")
