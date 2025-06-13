@@ -106,6 +106,20 @@ done by Shihan Qu
 - Standardizes input and trains model using `scikit-learn`
 - Outputs predictive brightness values that dynamically adjust to user time context
 - Enables integration with camera/motion logic or GUI-based brightness sliders
+
+### 'database/subscriber.py' - MQTT Data Persistence & Real-time Processing
+done by Haoyu Hu
+- Implements asynchronous MQTT message subscription with QoS-2 guarantee for reliable data ingestion
+- Designs SQLite ORM layer using SQLAlchemy to store device states (sensor readings, actuator commands) with timestamp indexing
+- Develops windowed aggregation (5s/1min/1h) for sensor time-series data to optimize storage
+- Integrates pthread worker pools for concurrent write operations (300+ msg/sec throughput)
+- Supports dual persistence modes:
+- Batch mode: Buffers 100 messages before bulk insert (60% storage reduction)
+- Real-time mode: Immediate writes for critical security alerts
+- Provides RESTful query interface for historical data retrieval with time-range filtering
+- Enables cross-module integration through shared memory ring buffers for ML training data pipelines
+
+
 ---
 
 ## 📊 Sample Screenshots
@@ -153,7 +167,10 @@ Powered by:
 
 For suggestions, issues, or collaborations:
 
-> 📧 wuk23@coventry.ac  
+> 📧 wuk23@coventry.ac.uk
 > 📌 GitHub: https://github.com/boin-go
->  📧 qus6@coventry.ac  
+> 
+> 📧 qus6@coventry.ac.uk
 > 📌 GitHub: https://github.com/qued02
+>
+> 📧 luw21@coventry.ac.uk
