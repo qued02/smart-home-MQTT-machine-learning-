@@ -6,16 +6,17 @@ import ssl
 from publisher.temperature import TemperaturePublisher
 from publisher.lighting import LightingPublisher
 from publisher.security import SecurityPublisher
+from schedule import SchedulerPublisher, SchedulerSubscriber
 from ui import SmartHomeUI
 import tkinter as tk
 import json
 import sqlite3
 from datetime import datetime, timedelta
-import random
+import queue
 
 # 配置常量（与其他模块一致）
 BROKER = 'test.mosquitto.org'
-PORT = 8883
+PORT = 1883  # 使用非SSL端口
 TEMPERATURE_TOPIC = "home/sensor/temperature"
 LIGHTING_TOPIC = "home/sensor/lighting"
 SECURITY_TOPIC = "home/security/status"
@@ -23,26 +24,27 @@ SECURITY_TOPIC = "home/security/status"
 
 class SmartHomeSystem:
     def __init__(self):
-        # 初始化MQTT客户端（使用VERSION2）
+        # 初始化MQTT客户端
         self.client = mqtt.Client(
             client_id="SmartHomeSystem",
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+            # callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             # paho-mqtt版本1.6.0不需要这行配置，版本1.5.0及以下需要
             protocol = mqtt.MQTTv311  # 明确指定协议版本
         )
-        try:
-            self.client.tls_set(
-                ca_certs="mosquitto.org.crt",
-                cert_reqs=ssl.CERT_REQUIRED,
-                tls_version=ssl.PROTOCOL_TLSv1_2
-            )
-            # 可选：设置TLS不安全的警告（仅用于测试）
-            # self.client.tls_insecure_set(True)
-        except Exception as e:
-            print(f"TLS配置错误: {e}")
-            raise
+        # 禁用SSL连接
+        # try:
+        #     self.client.tls_set(
+        #         ca_certs="mosquitto.org.crt",
+        #         cert_reqs=ssl.CERT_REQUIRED,
+        #         tls_version=ssl.PROTOCOL_TLSv1_2
+        #     )
+        #     # 可选：设置TLS不安全的警告（仅用于测试）
+        #     # self.client.tls_insecure_set(True)
+        # except Exception as e:
+        #     print(f"TLS配置错误: {e}")
+        #     raise
 
-            # 设置回调
+        # 设置回调
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
 
@@ -50,6 +52,10 @@ class SmartHomeSystem:
         self.temp_pub = TemperaturePublisher(self.client)
         self.light_pub = LightingPublisher(self.client)
         self.security_pub = SecurityPublisher(self.client)
+        
+        # 初始化定时任务发布者和订阅者
+        self.scheduler_pub = SchedulerPublisher(self.client)
+        self.scheduler_sub = SchedulerSubscriber(self.client, self.on_schedule_update)
 
         # 初始化数据库
         self.setup_database()
@@ -60,6 +66,9 @@ class SmartHomeSystem:
 
         self.app = None
         self.setup_database_maintenance()
+        
+        # 消息队列用于线程安全更新UI
+        self.ui_queue = queue.Queue()
 
     def setup_database_maintenance(self):
         """设置数据库定期维护"""
@@ -212,52 +221,27 @@ class SmartHomeSystem:
         conn.commit()
         conn.close()
 
-    def on_mqtt_message(self, client, userdata, msg):
-        try:
-            payload = msg.payload.decode()
-            topic = msg.topic
-
-            try:
-                data = json.loads(payload)
-                if not isinstance(data, dict):
-                    # 根据 topic 决定如何转换非字典数据
-                    if topic.endswith("temperature"):
-                        data = {"temperature": float(data), "comfort_level": "optimal"}
-                    elif topic.endswith("brightness"):
-                        data = {"brightness": int(data), "camera_mode": "auto"}
-                    else:
-                        print(f"未知的非字典数据: {payload}")
-                        return
-
-            except ValueError:
-                # 如果不是 JSON，尝试按 topic 解析
-                try:
-                    if topic.endswith("temperature"):
-                        data = {"temperature": float(payload), "comfort_level": "optimal"}
-                    elif topic.endswith("brightness"):
-                        data = {"brightness": int(payload), "camera_mode": "auto"}
-                    else:
-                        print(f"无法解析的数据: {payload}")
-                        return
-                except (ValueError, TypeError):
-                    print(f"无效的数值格式: {payload}")
-                    return
-
-            # 处理有效数据
-            self.handle_data(topic, data)
-
-        except Exception as e:
-            print(f"消息处理错误: {e}")
+    def on_schedule_update(self, data):
+        """处理定时任务更新消息"""
+        # 如果UI已初始化，则通知UI更新定时任务
+        if hasattr(self, 'ui_queue'):
+            self.ui_queue.put(("update_schedule", data))
 
     def start_ui(self):
         """启动UI界面"""
         # 确保在主线程中创建UI
         def _start_ui():
             # 创建UI实例
-            app = SmartHomeUI(self.root)
+            self.app = SmartHomeUI(self.root)
+            
+            # 传递必要的对象给UI
+            self.app.mqtt_client = self.client
+            self.app.scheduler_pub = self.scheduler_pub
+            self.app.ui_queue = self.ui_queue
+            
             # 显示主窗口
             self.root.deiconify()
-            app.run()
+            self.app.run()
 
         if threading.current_thread() is threading.main_thread():
             _start_ui()
@@ -270,10 +254,18 @@ class SmartHomeSystem:
             # 连接MQTT
             self.client.connect(BROKER, PORT, 60)
             self.client.loop_start()
+            
+            # 启动定时任务调度器
+            self.scheduler_pub.start()
 
             # 在主线程创建UI
             self.root.deiconify()
             self.app = SmartHomeUI(self.root)
+            
+            # 传递必要的对象给UI
+            self.app.mqtt_client = self.client
+            self.app.scheduler_pub = self.scheduler_pub
+            self.app.ui_queue = self.ui_queue
 
             # 在主线程中启动UI
             self.start_ui()
@@ -294,6 +286,10 @@ class SmartHomeSystem:
         finally:
             self.client.loop_stop()
             self.client.disconnect()
+            
+            # 停止定时任务调度器
+            self.scheduler_pub.stop()
+            
             if hasattr(self, 'root') and self.root:
                 self.root.quit()
 
@@ -311,6 +307,11 @@ class SmartHomeSystem:
             self.root.quit()
         if hasattr(self, 'client') and self.client:
             self.client.disconnect()
+            
+        # 停止定时任务调度器
+        if hasattr(self, 'scheduler_pub'):
+            self.scheduler_pub.stop()
+            
         plt.close('all')
         if hasattr(self, 'conn'):
             self.conn.close()
@@ -320,36 +321,16 @@ class SmartHomeSystem:
 
         def publish():
             try:
-                # 调用各Publisher的模拟方法生成新数据
-                self.temp_pub.data = {
-                    "temperature": self.temp_pub._simulate_real_temperature(),
-                    "comfort_level": "optimal",
-                    "anomaly": False
-                }
-
-                self.light_pub.data = {
-                    "brightness": self.light_pub._simulate_real_lighting(),
-                    "camera_mode": random.choice(["auto", "manual", "off"])
-                }
-
-                # 更新安全数据
-                sensor_data = self.security_pub._simulate_security_sensors()
-                self.security_pub.data.update(sensor_data)
-
-                # 发布数据
                 self.temp_pub.publish()
-                if time.time() % 3 < 0.1:
-                    self.light_pub.publish()
-                if time.time() % 2 < 0.1:
-                    self.security_pub.publish()
-
+                self.light_pub.publish()
+                self.security_pub.publish()
             except Exception as e:
                 print(f"Publish error: {e}")
             finally:
-                # 1秒后再次执行，加快更新频率
-                self.root.after(1000, publish)
+                # 10秒后再次执行
+                self.root.after(10000, publish)
 
-        # 立即开始，间隔1秒
+        # 立即开始
         self.root.after(0, publish)
 
 
